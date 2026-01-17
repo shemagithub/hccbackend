@@ -1,5 +1,6 @@
 import Opportunity from '../models/Opportunity.js';
 import Staff from '../models/Staff.js';
+import pool from '../config/db.js';
 
 export class OpportunityController {
   // Create a new opportunity
@@ -210,6 +211,7 @@ export class OpportunityController {
         department,
         year,
         urgency,
+        decision,
         page = 1,
         limit = 10,
         includeAll = false
@@ -247,12 +249,30 @@ export class OpportunityController {
       
       console.log('📋 getOpportunities - includeAll:', includeAll, 'shouldIncludeAll:', shouldIncludeAll, 'isSuperAdmin:', isSuperAdmin, 'userEmail:', userEmail);
 
+      // Get department filter from query or user's department
+      let departmentFilter = department;
+      if (!departmentFilter && req.staffId && !isSuperAdmin) {
+        try {
+          const staff = await Staff.findById(req.staffId);
+          if (staff && staff.departmentId) {
+            // Get department name from department ID
+            const [deptRows] = await pool.execute('SELECT name FROM departments WHERE id = ?', [staff.departmentId]);
+            if (deptRows.length > 0) {
+              departmentFilter = deptRows[0].name;
+            }
+          }
+        } catch (deptError) {
+          console.error('Error fetching department:', deptError);
+        }
+      }
+
       const filters = {
         search,
         status,
-        department,
+        department: departmentFilter,
         year,
         urgency,
+        decision,
         userEmail, // Filter by assigned user (null for SuperAdmin or when includeAll is true)
         limit: parseInt(limit),
         offset: (parseInt(page) - 1) * parseInt(limit)
@@ -424,8 +444,82 @@ export class OpportunityController {
         });
       }
 
+      // Validate file sizes if base64 data is provided (max 200MB per file)
+      // Base64 encoding increases size by ~33%, so we check the base64 string length
+      const maxFileSize = 200 * 1024 * 1024; // 200MB original file size
+      const maxBase64Size = 300 * 1024 * 1024; // 300MB max for base64 string (MySQL max_allowed_packet)
+      
+      if (updateData.winProbabilityDocument) {
+        // Check if it's a base64 string (with or without data URL prefix)
+        const base64Data = typeof updateData.winProbabilityDocument === 'string' && updateData.winProbabilityDocument.startsWith('data:') 
+          ? updateData.winProbabilityDocument.split(',')[1] || ''
+          : (typeof updateData.winProbabilityDocument === 'string' ? updateData.winProbabilityDocument : '');
+        
+        if (base64Data) {
+          // Base64 string length is approximately 4/3 of original file size
+          // So we check if base64 length * 3/4 exceeds maxFileSize
+          const estimatedFileSize = (base64Data.length * 3) / 4;
+          if (estimatedFileSize > maxFileSize) {
+            return res.status(400).json({
+              success: false,
+              message: `Win probability document exceeds 200MB limit. Estimated size: ${(estimatedFileSize / 1024 / 1024).toFixed(2)}MB. Please upload a smaller file.`
+            });
+          }
+          
+          // Also check the actual base64 string size (should not exceed 300MB)
+          if (base64Data.length > maxBase64Size) {
+            return res.status(400).json({
+              success: false,
+              message: `Win probability document is too large. Base64 encoded size (${(base64Data.length / 1024 / 1024).toFixed(2)}MB) exceeds 300MB MySQL packet limit. Please upload a smaller file.`
+            });
+          }
+        }
+      }
+      
+      if (updateData.supportingDocument) {
+        // Check if it's a base64 string (with or without data URL prefix)
+        const base64Data = typeof updateData.supportingDocument === 'string' && updateData.supportingDocument.startsWith('data:') 
+          ? updateData.supportingDocument.split(',')[1] || ''
+          : (typeof updateData.supportingDocument === 'string' ? updateData.supportingDocument : '');
+        
+        if (base64Data) {
+          // Base64 string length is approximately 4/3 of original file size
+          const estimatedFileSize = (base64Data.length * 3) / 4;
+          if (estimatedFileSize > maxFileSize) {
+            return res.status(400).json({
+              success: false,
+              message: `Supporting document exceeds 200MB limit. Estimated size: ${(estimatedFileSize / 1024 / 1024).toFixed(2)}MB. Please upload a smaller file.`
+            });
+          }
+          
+          // Also check the actual base64 string size (should not exceed 300MB)
+          if (base64Data.length > maxBase64Size) {
+            return res.status(400).json({
+              success: false,
+              message: `Supporting document is too large. Base64 encoded size (${(base64Data.length / 1024 / 1024).toFixed(2)}MB) exceeds 300MB MySQL packet limit. Please upload a smaller file.`
+            });
+          }
+        }
+      }
+
+      // Remove undefined values from updateData (but keep null as it's a valid value for clearing fields)
+      const cleanedUpdateData = {};
+      Object.keys(updateData).forEach(key => {
+        if (updateData[key] !== undefined) {
+          cleanedUpdateData[key] = updateData[key];
+        }
+      });
+
+      // Check if there are any fields to update
+      if (Object.keys(cleanedUpdateData).length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No valid fields provided to update'
+        });
+      }
+
       const dbId = opportunity.dbId || parseInt(id);
-      const success = await Opportunity.update(dbId, updateData);
+      const success = await Opportunity.update(dbId, cleanedUpdateData);
 
       if (success) {
         const updatedOpportunity = await Opportunity.findById(dbId);
@@ -443,7 +537,7 @@ export class OpportunityController {
       } else {
         res.status(500).json({
           success: false,
-          message: 'Failed to update opportunity'
+          message: 'Failed to update opportunity. No changes were made.'
         });
       }
     } catch (error) {

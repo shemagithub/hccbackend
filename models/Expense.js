@@ -20,6 +20,10 @@ class Expense {
         approval_date DATE NULL,
         approval_comments TEXT NULL,
         receipt_path VARCHAR(500) NULL,
+        receipt_data LONGTEXT NULL,
+        receipt_name VARCHAR(255) NULL,
+        receipt_type VARCHAR(100) NULL,
+        receipt_size VARCHAR(50) NULL,
         vendor VARCHAR(255) NULL,
         invoice_number VARCHAR(100) NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -35,6 +39,61 @@ class Expense {
     `;
     await pool.execute(query);
     console.log('Expenses table created or already exists.');
+    
+    // Add new receipt fields if they don't exist (migration)
+    try {
+      // First check if table exists
+      const [tables] = await pool.execute(`
+        SELECT TABLE_NAME 
+        FROM INFORMATION_SCHEMA.TABLES 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'expenses'
+      `);
+      
+      if (tables.length === 0) {
+        console.log('Expenses table does not exist yet, will be created with all columns.');
+        return;
+      }
+      
+      const [columns] = await pool.execute(`
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'expenses' 
+        AND COLUMN_NAME IN ('receipt_data', 'receipt_name', 'receipt_type', 'receipt_size')
+      `);
+      
+      const existingColumns = columns.map(col => col.COLUMN_NAME);
+      
+      if (!existingColumns.includes('receipt_data')) {
+        await pool.execute('ALTER TABLE expenses ADD COLUMN receipt_data LONGTEXT NULL AFTER receipt_path');
+        console.log('✅ Added receipt_data column to expenses table.');
+      }
+      if (!existingColumns.includes('receipt_name')) {
+        await pool.execute('ALTER TABLE expenses ADD COLUMN receipt_name VARCHAR(255) NULL AFTER receipt_data');
+        console.log('✅ Added receipt_name column to expenses table.');
+      }
+      if (!existingColumns.includes('receipt_type')) {
+        await pool.execute('ALTER TABLE expenses ADD COLUMN receipt_type VARCHAR(100) NULL AFTER receipt_name');
+        console.log('✅ Added receipt_type column to expenses table.');
+      }
+      if (!existingColumns.includes('receipt_size')) {
+        await pool.execute('ALTER TABLE expenses ADD COLUMN receipt_size VARCHAR(50) NULL AFTER receipt_type');
+        console.log('✅ Added receipt_size column to expenses table.');
+      }
+      
+      if (existingColumns.length === 4) {
+        console.log('✅ All receipt columns already exist in expenses table.');
+      }
+    } catch (migrationError) {
+      console.error('❌ Error migrating expenses table:', migrationError);
+      console.error('Migration error details:', {
+        message: migrationError.message,
+        code: migrationError.code,
+        sqlMessage: migrationError.sqlMessage
+      });
+      // Don't fail if migration fails - table might already have columns or migration might not be needed
+    }
   }
 
   static async generateExpenseId() {
@@ -59,25 +118,171 @@ class Expense {
     submittedByName,
     status = 'pending',
     receiptPath,
+    receiptData,
+    receiptName,
+    receiptType,
+    receiptSize,
     vendor,
     invoiceNumber
   }) {
-    const expId = expenseId || await this.generateExpenseId();
+    try {
+      const expId = expenseId || await this.generateExpenseId();
 
-    const [result] = await pool.execute(
-      `INSERT INTO expenses (
-        expense_id, project_id, category, description, amount, currency, expense_date,
-        submitted_by, submitted_by_name, status, receipt_path, vendor, invoice_number
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        expId, projectId || null, category, description, amount, currency,
-        expenseDate || new Date().toISOString().split('T')[0],
-        submittedBy || null, submittedByName || null, status,
-        receiptPath || null, vendor || null, invoiceNumber || null
-      ]
-    );
+      // Check if receipt columns exist, if not, use only basic columns
+      let hasReceiptColumns = true;
+      try {
+        const [columns] = await pool.execute(`
+          SELECT COLUMN_NAME 
+          FROM INFORMATION_SCHEMA.COLUMNS 
+          WHERE TABLE_SCHEMA = DATABASE() 
+          AND TABLE_NAME = 'expenses' 
+          AND COLUMN_NAME = 'receipt_data'
+        `);
+        hasReceiptColumns = columns.length > 0;
+      } catch (checkError) {
+        console.warn('Could not check for receipt columns, assuming they exist:', checkError.message);
+      }
 
-    return await this.findById(result.insertId);
+      // Get a connection to set max_allowed_packet for large file uploads
+      const connection = await pool.getConnection();
+      
+      try {
+        // Check current max_allowed_packet first (check GLOBAL, not SESSION, as SESSION is read-only)
+        let currentPacketSize = 0;
+        try {
+          // Check GLOBAL value (this is what new connections will use)
+          const [globalRows] = await connection.execute("SHOW GLOBAL VARIABLES LIKE 'max_allowed_packet'");
+          if (globalRows.length > 0) {
+            currentPacketSize = parseInt(globalRows[0].Value);
+            const packetSizeMB = (currentPacketSize / 1024 / 1024).toFixed(2);
+            console.log(`📦 GLOBAL max_allowed_packet: ${packetSizeMB}MB`);
+          }
+          
+          // Also check SESSION for reference
+          const [sessionRows] = await connection.execute("SHOW VARIABLES LIKE 'max_allowed_packet'");
+          if (sessionRows.length > 0) {
+            const sessionPacketSize = parseInt(sessionRows[0].Value);
+            const sessionPacketSizeMB = (sessionPacketSize / 1024 / 1024).toFixed(2);
+            console.log(`📦 SESSION max_allowed_packet: ${sessionPacketSizeMB}MB (read-only, new connections use GLOBAL)`);
+          }
+        } catch (checkError) {
+          console.warn('Could not check max_allowed_packet:', checkError.message);
+        }
+        
+        // Set max_allowed_packet to 300MB (314572800 bytes) if current is too small
+        const targetPacketSize = 314572800; // 300MB
+        if (currentPacketSize < targetPacketSize) {
+          // Try GLOBAL first (requires SUPER privilege but affects all connections)
+          try {
+            await connection.execute(`SET GLOBAL max_allowed_packet = ${targetPacketSize}`);
+            console.log('✅ Set GLOBAL max_allowed_packet to 300MB');
+            console.log('⚠️  Note: You may need to restart the backend server for new connections to use this setting.');
+            
+            // SESSION max_allowed_packet is read-only in newer MySQL versions
+            // New connections will automatically use the GLOBAL value
+            // For this connection, we need to reconnect to pick up the GLOBAL value
+            // But since we're in a transaction, we'll proceed and hope the GLOBAL setting helps
+          } catch (globalError) {
+            console.warn('Could not set GLOBAL max_allowed_packet:', globalError.message);
+            console.warn('⚠️  Please run: npm run set-max-allowed-packet');
+            console.warn('⚠️  Or restart your MySQL server with max_allowed_packet=300M in my.cnf');
+          }
+        }
+        
+        // Verify the actual max_allowed_packet value after setting
+        try {
+          const [rows] = await connection.execute("SHOW VARIABLES LIKE 'max_allowed_packet'");
+          if (rows.length > 0) {
+            const packetSize = parseInt(rows[0].Value);
+            const packetSizeMB = (packetSize / 1024 / 1024).toFixed(2);
+            console.log(`📦 Final max_allowed_packet: ${packetSizeMB}MB`);
+            
+            // Check if receipt data would exceed the limit
+            if (receiptData) {
+              const receiptSizeMB = receiptData.length / 1024 / 1024;
+              if (receiptSizeMB > packetSize / 1024 / 1024 * 0.9) { // 90% of limit as safety margin
+                console.warn(`⚠️ Receipt size (${receiptSizeMB.toFixed(2)}MB) is close to max_allowed_packet limit (${packetSizeMB}MB)`);
+              }
+            }
+          }
+        } catch (checkError) {
+          console.warn('Could not verify max_allowed_packet:', checkError.message);
+        }
+
+        let query, params;
+        
+        if (hasReceiptColumns) {
+          // Use full query with receipt columns
+          query = `INSERT INTO expenses (
+            expense_id, project_id, category, description, amount, currency, expense_date,
+            submitted_by, submitted_by_name, status, receipt_path, receipt_data, receipt_name, receipt_type, receipt_size, vendor, invoice_number
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+          params = [
+            expId, projectId || null, category, description, amount, currency,
+            expenseDate || new Date().toISOString().split('T')[0],
+            submittedBy || null, submittedByName || null, status,
+            receiptPath || null, receiptData || null, receiptName || null, receiptType || null, receiptSize || null,
+            vendor || null, invoiceNumber || null
+          ];
+        } else {
+          // Fallback to basic query without receipt columns
+          console.warn('Receipt columns not found, using basic INSERT without receipt data');
+          query = `INSERT INTO expenses (
+            expense_id, project_id, category, description, amount, currency, expense_date,
+            submitted_by, submitted_by_name, status, receipt_path, vendor, invoice_number
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+          params = [
+            expId, projectId || null, category, description, amount, currency,
+            expenseDate || new Date().toISOString().split('T')[0],
+            submittedBy || null, submittedByName || null, status,
+            receiptPath || null,
+            vendor || null, invoiceNumber || null
+          ];
+        }
+
+        const [result] = await connection.execute(query, params);
+        const expense = await this.findById(result.insertId);
+        return expense;
+      } finally {
+        connection.release();
+      }
+    } catch (error) {
+      console.error('Error in Expense.create:', error);
+      console.error('SQL Error details:', {
+        message: error.message,
+        code: error.code,
+        sqlMessage: error.sqlMessage,
+        sqlState: error.sqlState
+      });
+      
+      // Provide helpful error message for packet size errors
+      if (error.code === 'ER_NET_PACKET_TOO_LARGE' || error.message?.includes('max_allowed_packet')) {
+        const fileSizeMB = receiptData ? (receiptData.length / 1024 / 1024).toFixed(2) : 'unknown';
+        const originalSizeMB = receiptData ? ((receiptData.length * 3 / 4) / 1024 / 1024).toFixed(2) : 'unknown';
+        
+        // Try to get the actual max_allowed_packet value for better error message
+        let packetSizeInfo = '';
+        try {
+          const checkConnection = await pool.getConnection();
+          try {
+            const [packetRows] = await checkConnection.execute("SHOW VARIABLES LIKE 'max_allowed_packet'");
+            if (packetRows.length > 0) {
+              const packetSize = parseInt(packetRows[0].Value);
+              const packetSizeMB = (packetSize / 1024 / 1024).toFixed(2);
+              packetSizeInfo = ` Current MySQL max_allowed_packet is ${packetSizeMB}MB.`;
+            }
+          } finally {
+            checkConnection.release();
+          }
+        } catch (checkErr) {
+          // Ignore check errors
+        }
+        
+        throw new Error(`Receipt file is too large (original: ${originalSizeMB}MB, encoded: ${fileSizeMB}MB).${packetSizeInfo} Please run 'npm run set-max-allowed-packet' in the backend directory or contact your administrator to increase the database packet size limit.`);
+      }
+      
+      throw error;
+    }
   }
 
   static async findAll(filters = {}) {
@@ -172,6 +377,23 @@ class Expense {
     return this.mapRowToExpense(rows[0]);
   }
 
+  static async findByExpenseId(expenseId) {
+    const [rows] = await pool.execute(
+      `SELECT e.*, p.name as project_name, p.project_id as project_code,
+              s1.first_name as submitter_first_name, s1.last_name as submitter_last_name,
+              s2.first_name as approver_first_name, s2.last_name as approver_last_name
+       FROM expenses e
+       LEFT JOIN projects p ON e.project_id = p.id
+       LEFT JOIN staff s1 ON e.submitted_by = s1.id
+       LEFT JOIN staff s2 ON e.approved_by = s2.id
+       WHERE e.expense_id = ?`,
+      [expenseId]
+    );
+
+    if (rows.length === 0) return null;
+    return this.mapRowToExpense(rows[0]);
+  }
+
   static async update(id, updateData) {
     const updateFields = [];
     const params = [];
@@ -189,6 +411,10 @@ class Expense {
       approvalDate: 'approval_date',
       approvalComments: 'approval_comments',
       receiptPath: 'receipt_path',
+      receiptData: 'receipt_data',
+      receiptName: 'receipt_name',
+      receiptType: 'receipt_type',
+      receiptSize: 'receipt_size',
       vendor: 'vendor',
       invoiceNumber: 'invoice_number'
     };
@@ -264,6 +490,10 @@ class Expense {
       approvalDate: row.approval_date ? row.approval_date.toISOString().split('T')[0] : null,
       approvalComments: row.approval_comments,
       receiptPath: row.receipt_path,
+      receiptData: row.receipt_data,
+      receiptName: row.receipt_name,
+      receiptType: row.receipt_type,
+      receiptSize: row.receipt_size,
       vendor: row.vendor,
       invoiceNumber: row.invoice_number,
       createdAt: row.created_at,

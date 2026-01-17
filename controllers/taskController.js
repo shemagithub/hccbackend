@@ -185,6 +185,7 @@ export class TaskController {
         assigneeId,
         status,
         priority,
+        overdue,
         page = 1,
         limit = 50
       } = req.query;
@@ -195,6 +196,7 @@ export class TaskController {
         assigneeId: assigneeId ? parseInt(assigneeId) : null,
         status,
         priority,
+        overdue: overdue === 'true' || overdue === true,
         limit: parseInt(limit),
         offset: (parseInt(page) - 1) * parseInt(limit)
       };

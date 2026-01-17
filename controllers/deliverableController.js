@@ -1,5 +1,6 @@
 import Deliverable from '../models/Deliverable.js';
 import Staff from '../models/Staff.js';
+import Review from '../models/Review.js';
 
 export class DeliverableController {
   // Create a new deliverable
@@ -15,6 +16,9 @@ export class DeliverableController {
         submissionDate,
         status = 'draft',
         filePath,
+        fileData,
+        fileName,
+        fileType,
         fileSize,
         version = '1.0',
         priority = 'medium'
@@ -53,10 +57,35 @@ export class DeliverableController {
         submissionDate,
         status,
         filePath: filePath || null,
+        fileData: fileData || null,
+        fileName: fileName || null,
+        fileType: fileType || null,
         fileSize: fileSize || null,
         version,
         priority
       });
+
+      // Auto-create review when deliverable is submitted for review
+      if (status === 'pending_review' || status === 'under_review') {
+        try {
+          await Review.create({
+            itemType: 'deliverable',
+            itemId: deliverable.dbId,
+            itemReference: deliverable.id,
+            projectId: deliverable.projectId,
+            title: title,
+            description: description,
+            submittedBy: req.staffId || null,
+            submittedByName: submittedByName,
+            submissionDate: submissionDate || new Date().toISOString().split('T')[0],
+            status: status,
+            priority: priority
+          });
+        } catch (reviewError) {
+          console.error('Error creating review for deliverable:', reviewError);
+          // Continue even if review creation fails
+        }
+      }
 
       res.status(201).json({
         success: true,
@@ -114,11 +143,12 @@ export class DeliverableController {
           total: stats.total
         },
         stats: {
-          total: stats.total,
-          pending: stats.pending,
-          approved: stats.approved,
-          rejected: stats.rejected,
-          underReview: stats.underReview
+          total: stats.total || 0,
+          pending: stats.pendingReview || 0,
+          approved: stats.approved || 0,
+          rejected: stats.rejected || 0,
+          underReview: stats.underReview || 0,
+          revisionRequested: stats.revisionRequested || 0
         }
       });
     } catch (error) {
@@ -285,6 +315,33 @@ export class DeliverableController {
       res.status(500).json({
         success: false,
         message: 'Failed to delete deliverable.',
+        error: error.message
+      });
+    }
+  }
+
+  // Get deliverable statistics
+  static async getDeliverableStats(req, res) {
+    try {
+      const { projectId } = req.query;
+      const stats = await Deliverable.getStats(projectId ? parseInt(projectId) : null);
+
+      res.json({
+        success: true,
+        data: {
+          total: stats.total || 0,
+          pending: stats.pendingReview || 0,
+          approved: stats.approved || 0,
+          rejected: stats.rejected || 0,
+          underReview: stats.underReview || 0,
+          revisionRequested: stats.revisionRequested || 0
+        }
+      });
+    } catch (error) {
+      console.error('Get deliverable stats error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch deliverable statistics.',
         error: error.message
       });
     }

@@ -92,12 +92,29 @@ class Implementation {
 
   static async findAll(filters = {}) {
     let query = `
-      SELECT i.*, p.name as project_name
+      SELECT i.*, p.name as project_name, p.department as project_department
       FROM implementations i
       LEFT JOIN projects p ON i.project_id = p.id
       WHERE 1=1
     `;
     const params = [];
+
+    // Filter by assigned user email (if provided)
+    // assigned_to is a comma-separated string of emails
+    if (filters.userEmail) {
+      query += ` AND (
+        i.assigned_to LIKE ? OR
+        i.assigned_to LIKE ? OR
+        i.assigned_to LIKE ? OR
+        i.assigned_to = ?
+      )`;
+      // Match email at start, middle, or end of comma-separated list
+      const emailPattern1 = `${filters.userEmail},%`; // Email at start
+      const emailPattern2 = `%,${filters.userEmail},%`; // Email in middle
+      const emailPattern3 = `%,${filters.userEmail}`; // Email at end
+      const exactMatch = filters.userEmail; // Exact match (single email)
+      params.push(emailPattern1, emailPattern2, emailPattern3, exactMatch);
+    }
 
     if (filters.status) {
       query += ` AND i.status = ?`;
@@ -117,6 +134,19 @@ class Implementation {
     if (filters.projectId) {
       query += ` AND i.project_id = ?`;
       params.push(filters.projectId);
+    }
+
+    // Filter by department (through project)
+    if (filters.department) {
+      query += ` AND p.department = ?`;
+      params.push(filters.department);
+    }
+
+    if (filters.departmentId) {
+      query += ` AND EXISTS (
+        SELECT 1 FROM departments d WHERE d.id = ? AND d.name = p.department
+      )`;
+      params.push(filters.departmentId);
     }
 
     query += ` ORDER BY i.created_at DESC`;
@@ -207,6 +237,7 @@ class Implementation {
       dbId: row.id,
       projectId: row.project_id,
       projectName: row.project_name,
+      projectDepartment: row.project_department || null,
       title: row.title,
       client: row.client,
       description: row.description,

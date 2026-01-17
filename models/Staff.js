@@ -224,7 +224,8 @@ class Staff {
     }
     if (controlPanel !== undefined) {
       updateFields.push('control_panel = ?');
-      params.push(controlPanel);
+      // Convert empty string to null for database consistency
+      params.push(controlPanel === '' || controlPanel === null ? null : controlPanel);
     }
     if (status !== undefined) {
       updateFields.push('status = ?');

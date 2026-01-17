@@ -16,6 +16,9 @@ class Deliverable {
         submission_date DATE NOT NULL,
         status ENUM('draft', 'pending_review', 'under_review', 'approved', 'rejected', 'revision_requested') DEFAULT 'draft',
         file_path VARCHAR(500) NULL,
+        file_data LONGTEXT NULL,
+        file_name VARCHAR(255) NULL,
+        file_type VARCHAR(100) NULL,
         file_size VARCHAR(50) NULL,
         version VARCHAR(20) DEFAULT '1.0',
         reviewed_by INT NULL,
@@ -36,6 +39,20 @@ class Deliverable {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     await pool.execute(query);
+    
+    // Add new file fields if they don't exist (migration)
+    try {
+      await pool.execute(`
+        ALTER TABLE deliverables 
+        ADD COLUMN IF NOT EXISTS file_data LONGTEXT NULL,
+        ADD COLUMN IF NOT EXISTS file_name VARCHAR(255) NULL,
+        ADD COLUMN IF NOT EXISTS file_type VARCHAR(100) NULL
+      `);
+    } catch (error) {
+      // Columns might already exist, ignore error
+      console.log('Note: file_data, file_name, and file_type columns may already exist');
+    }
+    
     console.log('Deliverables table created or already exists.');
   }
 
@@ -61,6 +78,9 @@ class Deliverable {
     submissionDate,
     status = 'draft',
     filePath,
+    fileData,
+    fileName,
+    fileType,
     fileSize,
     version = '1.0',
     priority = 'medium'
@@ -70,12 +90,12 @@ class Deliverable {
     const [result] = await pool.execute(
       `INSERT INTO deliverables (
         deliverable_id, project_id, type, category, title, description, submitted_by, submitted_by_name,
-        submission_date, status, file_path, file_size, version, priority
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        submission_date, status, file_path, file_data, file_name, file_type, file_size, version, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         delId, projectId || null, type, category, title, description || null,
         submittedBy || null, submittedByName || null, submissionDate || new Date().toISOString().split('T')[0],
-        status, filePath || null, fileSize || null, version, priority
+        status, filePath || null, fileData || null, fileName || null, fileType || null, fileSize || null, version, priority
       ]
     );
 
@@ -193,6 +213,9 @@ class Deliverable {
       description: 'description',
       status: 'status',
       filePath: 'file_path',
+      fileData: 'file_data',
+      fileName: 'file_name',
+      fileType: 'file_type',
       fileSize: 'file_size',
       version: 'version',
       reviewedBy: 'reviewed_by',
@@ -265,6 +288,9 @@ class Deliverable {
       submissionDate: row.submission_date ? row.submission_date.toISOString().split('T')[0] : null,
       status: row.status,
       filePath: row.file_path,
+      fileData: row.file_data,
+      fileName: row.file_name,
+      fileType: row.file_type,
       fileSize: row.file_size,
       version: row.version,
       reviewedBy: row.reviewed_by,

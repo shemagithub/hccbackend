@@ -10,6 +10,9 @@ router.use(authenticate);
 // Create a new deliverable
 router.post('/', DeliverableController.createDeliverable);
 
+// Get deliverable stats
+router.get('/stats', DeliverableController.getDeliverableStats);
+
 // Get all deliverables
 router.get('/', DeliverableController.getDeliverables);
 

@@ -1,9 +1,17 @@
 import Document from '../models/Document.js';
 
+// Ensure Document model is properly imported
+if (!Document) {
+  console.error('❌ Document model not imported correctly');
+}
+
 export class DocumentController {
   // Create a new document
   static async createDocument(req, res) {
     try {
+      console.log('📋 Creating document - Request body keys:', Object.keys(req.body || {}));
+      console.log('📋 Creating document - staffId:', req.staffId);
+      
       const {
         documentId,
         projectId,
@@ -27,6 +35,8 @@ export class DocumentController {
           message: 'Missing required field: name is required'
         });
       }
+      
+      console.log('📋 Document data - name:', name, 'fileType:', fileType, 'fileSize:', fileSize);
 
       // Validate file sizes if base64 data is provided (max 200MB per file)
       // Base64 encoding increases size by ~33%, so we check the base64 string length
@@ -75,6 +85,20 @@ export class DocumentController {
         });
       }
 
+      console.log('📋 Calling Document.create with:', {
+        documentId,
+        projectId: projectId || null,
+        name,
+        fileType,
+        fileSize,
+        hasFileData: !!fileData,
+        fileDataLength: fileData ? fileData.length : 0,
+        permissions,
+        status,
+        uploadedBy,
+        uploadedByName
+      });
+
       const document = await Document.create({
         documentId,
         projectId: projectId || null,
@@ -90,17 +114,27 @@ export class DocumentController {
         uploadDate
       });
 
+      console.log('✅ Document created successfully:', document?.id || document?.document_id);
+
       res.status(201).json({
         success: true,
         message: 'Document uploaded successfully',
         data: document
       });
     } catch (error) {
-      console.error('Create document error:', error);
+      console.error('❌ Create document error:', error);
+      console.error('❌ Error stack:', error.stack);
+      console.error('❌ Error code:', error.code);
+      console.error('❌ Error sqlMessage:', error.sqlMessage);
       res.status(500).json({
         success: false,
         message: 'Failed to upload document',
-        error: error.message
+        error: error.message || 'Unknown error',
+        details: process.env.NODE_ENV === 'development' ? {
+          code: error.code,
+          sqlMessage: error.sqlMessage,
+          stack: error.stack
+        } : undefined
       });
     }
   }
@@ -126,21 +160,34 @@ export class DocumentController {
         offset: (parseInt(page) - 1) * parseInt(limit)
       };
 
+      console.log('📋 Fetching documents with filters:', filters);
+
       const documents = await Document.findAll(filters);
-      const stats = await Document.getStats({ projectId: filters.projectId });
+      
+      // Ensure stats call handles null projectId correctly
+      const statsFilters = filters.projectId ? { projectId: filters.projectId } : {};
+      let stats;
+      try {
+        stats = await Document.getStats(statsFilters);
+      } catch (statsError) {
+        console.error('Error fetching document stats:', statsError);
+        // Use default stats if stats query fails
+        stats = { total: String(documents.length), active: '0', archived: '0', pending: '0', pdf_count: '0', shared_count: '0' };
+      }
 
       res.json({
         success: true,
-        data: documents,
+        data: documents || [],
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
-          total: stats.total || 0
+          total: parseInt(stats?.total || documents.length)
         },
-        stats
+        stats: stats || { total: '0', active: '0', archived: '0', pending: '0', pdf_count: '0', shared_count: '0' }
       });
     } catch (error) {
       console.error('Get documents error:', error);
+      console.error('Error stack:', error.stack);
       res.status(500).json({
         success: false,
         message: 'Failed to fetch documents',

@@ -20,6 +20,7 @@ class Project {
         priority ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
         description TEXT NULL,
         location VARCHAR(255) NULL,
+        assigned_to VARCHAR(255) NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_status (status),
@@ -58,18 +59,20 @@ class Project {
     teamSize = 0,
     priority = 'medium',
     description,
-    location
+    location,
+    assignedTo
   }) {
     const projId = projectId || await this.generateProjectId();
 
     const [result] = await pool.execute(
       `INSERT INTO projects (
         project_id, name, client, department, manager, status, start_date, end_date,
-        progress, budget, spent, team_size, priority, description, location
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        progress, budget, spent, team_size, priority, description, location, assigned_to
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         projId, name, client, department || null, manager, status, startDate, endDate,
-        progress, budget, spent, teamSize, priority, description || null, location || null
+        progress, budget, spent, teamSize, priority, description || null, location || null,
+        (assignedTo && String(assignedTo).trim()) || null
       ]
     );
 
@@ -79,6 +82,23 @@ class Project {
   static async findAll(filters = {}) {
     let query = `SELECT * FROM projects WHERE 1=1`;
     const params = [];
+
+    // Filter by assigned user email (if provided)
+    // assigned_to is a comma-separated string of emails
+    if (filters.userEmail) {
+      query += ` AND (
+        assigned_to LIKE ? OR
+        assigned_to LIKE ? OR
+        assigned_to LIKE ? OR
+        assigned_to = ?
+      )`;
+      // Match email at start, middle, or end of comma-separated list
+      const emailPattern1 = `${filters.userEmail},%`; // Email at start
+      const emailPattern2 = `%,${filters.userEmail},%`; // Email in middle
+      const emailPattern3 = `%,${filters.userEmail}`; // Email at end
+      const exactMatch = filters.userEmail; // Exact match (single email)
+      params.push(emailPattern1, emailPattern2, emailPattern3, exactMatch);
+    }
 
     if (filters.search) {
       query += ` AND (
@@ -173,7 +193,8 @@ class Project {
       teamSize: 'team_size',
       priority: 'priority',
       description: 'description',
-      location: 'location'
+      location: 'location',
+      assignedTo: 'assigned_to'
     };
 
     Object.keys(updateData).forEach(key => {
@@ -255,6 +276,7 @@ class Project {
       priority: row.priority,
       description: row.description,
       location: row.location,
+      assignedTo: row.assigned_to,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

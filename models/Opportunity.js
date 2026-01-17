@@ -259,6 +259,11 @@ class Opportunity {
       params.push(filters.urgency);
     }
 
+    if (filters.decision && filters.decision !== 'all') {
+      query += ` AND decision = ?`;
+      params.push(filters.decision);
+    }
+
     query += ` ORDER BY created_at DESC`;
 
     if (filters.limit) {
@@ -330,17 +335,143 @@ class Opportunity {
     if (updateFields.length === 0) return false;
 
     params.push(id);
-    const [result] = await pool.execute(
-      `UPDATE opportunities SET ${updateFields.join(', ')}, updated_at = NOW() WHERE id = ?`,
-      params
-    );
-
-    return result.affectedRows > 0;
+    
+    // Use getConnection pattern for better error handling with retry logic
+    let connection = null;
+    let retryConnection = null;
+    try {
+      connection = await pool.getConnection();
+      // Set max_allowed_packet for this connection (300MB = 314572800 bytes)
+      try {
+        await connection.execute("SET SESSION max_allowed_packet = 314572800");
+        // Verify it was set correctly
+        const [result] = await connection.execute("SHOW VARIABLES LIKE 'max_allowed_packet'");
+        if (result.length > 0) {
+          const currentValue = parseInt(result[0].Value);
+          console.log(`📦 max_allowed_packet set to: ${(currentValue / 1024 / 1024).toFixed(2)}MB`);
+        }
+      } catch (setPacketError) {
+        console.warn('⚠️ Could not set SESSION max_allowed_packet:', setPacketError.message);
+        // Try to set GLOBAL instead (requires SUPER privilege)
+        try {
+          await connection.execute("SET GLOBAL max_allowed_packet = 314572800");
+        } catch (globalError) {
+          console.warn('⚠️ Could not set GLOBAL max_allowed_packet:', globalError.message);
+        }
+      }
+      
+      const [result] = await connection.execute(
+        `UPDATE opportunities SET ${updateFields.join(', ')}, updated_at = NOW() WHERE id = ?`,
+        params
+      );
+      connection.release();
+      connection = null;
+      return result.affectedRows > 0;
+    } catch (error) {
+      // Release first connection if it exists
+      if (connection) {
+        try {
+          connection.release();
+          connection = null;
+        } catch (releaseError) {
+          console.error('Error releasing initial connection:', releaseError);
+        }
+      }
+      
+      // If connection error or packet too large, try once more with a new connection
+      const errorMessage = error.message || '';
+      const shouldRetry = error.code === 'ECONNRESET' || 
+                         error.code === 'PROTOCOL_CONNECTION_LOST' || 
+                         error.code === 'PROTOCOL_ENQUEUE_AFTER_QUIT' || 
+                         error.code === 'ER_NET_PACKET_TOO_LARGE' ||
+                         errorMessage.includes('closed state') ||
+                         errorMessage.includes('connection') ||
+                         errorMessage.includes('Connection');
+      
+      if (shouldRetry) {
+        try {
+          // Wait a bit before retry to allow connection pool to recover
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          retryConnection = await pool.getConnection();
+          
+          // Verify connection is alive before using it
+          try {
+            await retryConnection.ping();
+          } catch (pingError) {
+            retryConnection.release();
+            retryConnection = null;
+            throw new Error('Connection ping failed during retry');
+          }
+          
+          // Set max_allowed_packet for retry connection (300MB = 314572800 bytes)
+          try {
+            await retryConnection.execute("SET SESSION max_allowed_packet = 314572800");
+            // Verify it was set correctly
+            const [result] = await retryConnection.execute("SHOW VARIABLES LIKE 'max_allowed_packet'");
+            if (result.length > 0) {
+              const currentValue = parseInt(result[0].Value);
+              console.log(`📦 Retry connection max_allowed_packet set to: ${(currentValue / 1024 / 1024).toFixed(2)}MB`);
+            }
+          } catch (setPacketError) {
+            console.warn('⚠️ Could not set SESSION max_allowed_packet on retry:', setPacketError.message);
+            // Try to set GLOBAL instead (requires SUPER privilege)
+            try {
+              await retryConnection.execute("SET GLOBAL max_allowed_packet = 314572800");
+            } catch (globalError) {
+              console.warn('⚠️ Could not set GLOBAL max_allowed_packet on retry:', globalError.message);
+            }
+          }
+          
+          const [result] = await retryConnection.execute(
+            `UPDATE opportunities SET ${updateFields.join(', ')}, updated_at = NOW() WHERE id = ?`,
+            params
+          );
+          
+          retryConnection.release();
+          retryConnection = null;
+          return result.affectedRows > 0;
+        } catch (retryError) {
+          // Release retry connection if retry also fails
+          if (retryConnection) {
+            try {
+              retryConnection.release();
+              retryConnection = null;
+            } catch (releaseError) {
+              console.error('Error releasing retry connection after failure:', releaseError);
+            }
+          }
+          throw retryError;
+        }
+      }
+      throw error;
+    } finally {
+      // Ensure all connections are released
+      if (connection) {
+        try {
+          connection.release();
+        } catch (releaseError) {
+          console.error('Error releasing connection in finally block:', releaseError);
+        }
+      }
+      if (retryConnection) {
+        try {
+          retryConnection.release();
+        } catch (releaseError) {
+          console.error('Error releasing retry connection in finally block:', releaseError);
+        }
+      }
+    }
   }
 
   static async delete(id) {
-    const [result] = await pool.execute('DELETE FROM opportunities WHERE id = ?', [id]);
-    return result.affectedRows > 0;
+    const connection = await pool.getConnection();
+    try {
+      const [result] = await connection.execute('DELETE FROM opportunities WHERE id = ?', [id]);
+      return result.affectedRows > 0;
+    } finally {
+      connection.release();
+    }
   }
 
   static async getStats(userEmail = null) {

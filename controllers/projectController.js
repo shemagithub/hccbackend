@@ -1,4 +1,6 @@
 import Project from '../models/Project.js';
+import Staff from '../models/Staff.js';
+import Implementation from '../models/Implementation.js';
 
 export class ProjectController {
   // Create a new project
@@ -19,7 +21,8 @@ export class ProjectController {
         teamSize = 0,
         priority = 'medium',
         description,
-        location
+        location,
+        assignedTo
       } = req.body;
 
       // Validation
@@ -77,8 +80,39 @@ export class ProjectController {
         teamSize,
         priority,
         description,
-        location
+        location,
+        assignedTo
       });
+
+      // If project status is "ongoing" (approved), automatically create an implementation
+      if (status === 'ongoing' && project.dbId) {
+        try {
+          // Check if implementation already exists for this project
+          const existingImplementation = await Implementation.findAll({ projectId: project.dbId });
+          if (existingImplementation.length === 0) {
+            await Implementation.create({
+              projectId: project.dbId,
+              title: name,
+              client: client,
+              description: description || null,
+              startDate: startDate,
+              endDate: endDate,
+              status: 'planning',
+              progress: progress || 0,
+              budget: budget || 0,
+              spent: spent || 0,
+              assignedTo: assignedTo || null,
+              teamSize: teamSize || 0,
+              priority: priority || 'medium',
+              createdBy: req.staffId || null
+            });
+            console.log(`✅ Auto-created implementation for approved project: ${project.name}`);
+          }
+        } catch (implError) {
+          console.error('Error auto-creating implementation:', implError);
+          // Don't fail the project creation if implementation creation fails
+        }
+      }
 
       res.status(201).json({
         success: true,
@@ -107,8 +141,42 @@ export class ProjectController {
         departmentId,
         manager,
         page = 1,
-        limit = 10
+        limit = 10,
+        includeAll = false
       } = req.query;
+
+      // Get the logged-in user's email from staff ID
+      // Only filter by user if includeAll is not true
+      // SuperAdmin users always get all projects regardless of includeAll flag
+      let userEmail = null;
+      let isSuperAdmin = false;
+      
+      // Check includeAll - it comes as a string from query params
+      const shouldIncludeAll = includeAll === 'true' || includeAll === true || includeAll === '1';
+      
+      if (req.staffId) {
+        try {
+          const staff = await Staff.findById(req.staffId);
+          if (staff) {
+            // Check if user is SuperAdmin or Finance - always give full access
+            const userRole = staff.role?.toLowerCase() || '';
+            if (userRole === 'superadmin' || userRole === 'finance') {
+              isSuperAdmin = true;
+              userEmail = null; // SuperAdmin and Finance get all projects
+              console.log(`📋 getProjects - ${staff.role} user detected, granting full access`);
+            } else if (!shouldIncludeAll && staff.email) {
+              // Regular users: filter by their email unless includeAll is true
+              userEmail = staff.email;
+              console.log(`📋 getProjects - Filtering by user email: ${userEmail}`);
+            }
+          }
+        } catch (staffError) {
+          console.error('Error fetching staff info:', staffError);
+          // Continue without filtering if staff lookup fails
+        }
+      }
+      
+      console.log('📋 getProjects - includeAll:', includeAll, 'shouldIncludeAll:', shouldIncludeAll, 'isSuperAdmin:', isSuperAdmin, 'userEmail:', userEmail);
 
       const filters = {
         search,
@@ -118,6 +186,7 @@ export class ProjectController {
         department,
         departmentId: departmentId ? parseInt(departmentId) : undefined,
         manager,
+        userEmail, // Filter by assigned user (null for SuperAdmin or when includeAll is true)
         limit: parseInt(limit),
         offset: (parseInt(page) - 1) * parseInt(limit)
       };
@@ -227,10 +296,42 @@ export class ProjectController {
       }
 
       const dbId = project.dbId || parseInt(id);
+      const oldStatus = project.status;
       const success = await Project.update(dbId, updateData);
 
       if (success) {
         const updatedProject = await Project.findById(dbId);
+        
+        // If project status changed to "ongoing" (approved), automatically create an implementation
+        if (updateData.status === 'ongoing' && oldStatus !== 'ongoing' && updatedProject.dbId) {
+          try {
+            // Check if implementation already exists for this project
+            const existingImplementation = await Implementation.findAll({ projectId: updatedProject.dbId });
+            if (existingImplementation.length === 0) {
+              await Implementation.create({
+                projectId: updatedProject.dbId,
+                title: updatedProject.name,
+                client: updatedProject.client,
+                description: updatedProject.description || null,
+                startDate: updatedProject.startDate,
+                endDate: updatedProject.endDate,
+                status: 'planning',
+                progress: updatedProject.progress || 0,
+                budget: updatedProject.budget || 0,
+                spent: updatedProject.spent || 0,
+                assignedTo: updatedProject.assignedTo || null,
+                teamSize: updatedProject.teamSize || 0,
+                priority: updatedProject.priority || 'medium',
+                createdBy: req.staffId || null
+              });
+              console.log(`✅ Auto-created implementation for approved project: ${updatedProject.name}`);
+            }
+          } catch (implError) {
+            console.error('Error auto-creating implementation:', implError);
+            // Don't fail the project update if implementation creation fails
+          }
+        }
+        
         res.json({
           success: true,
           message: 'Project updated successfully',

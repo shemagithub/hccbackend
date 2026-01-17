@@ -1,6 +1,52 @@
 import Staff from '../models/Staff.js';
 import pool from '../config/db.js';
 
+// Ensure Finance department exists and return its id
+async function ensureFinanceDepartment() {
+  // Try to find existing Finance department by code or name
+  const [existing] = await pool.execute(
+    'SELECT id FROM departments WHERE department_code = ? OR name = ? LIMIT 1',
+    ['FIN-001', 'Finance']
+  );
+
+  if (existing.length > 0) {
+    return existing[0].id;
+  }
+
+  // Create a minimal Finance department record
+  const insertQuery = `
+    INSERT INTO departments (
+      name, description, department_code, location, budget,
+      phone, email, website, status, notes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+
+  const description = 'Financial planning and accounting';
+  const location = 'Head Office';
+  const budget = 0;
+  const phone = null;
+  const email = 'finance@company.com';
+  const website = null;
+  const status = 'active';
+  const notes = 'Auto-created by init-staff script';
+
+  const [result] = await pool.execute(insertQuery, [
+    'Finance',
+    description,
+    'FIN-001',
+    location,
+    budget,
+    phone,
+    email,
+    website,
+    status,
+    notes,
+  ]);
+
+  console.log('✅ Finance department auto-created for staff initialization');
+  return result.insertId;
+}
+
 export async function initializeStaffTable() {
   try {
     console.log('Initializing staff table...');
@@ -14,6 +60,9 @@ export async function initializeStaffTable() {
     
     if (staffCount === 0) {
       console.log('Staff table is empty, inserting sample data...');
+      
+      // Ensure Finance department exists and get its id
+      const financeDeptId = await ensureFinanceDepartment();
       
       // Sample staff data
       const sampleStaff = [
@@ -88,12 +137,27 @@ export async function initializeStaffTable() {
           email: 'lisa.davis@company.com',
           phone: '+1-555-0106',
           password: 'Password123!',
-          departmentId: 5, // Finance
+          departmentId: financeDeptId, // Finance
           position: 'Financial Analyst',
-          role: 'employee',
+          role: 'finance_officer',
+          controlPanel: 'finance',
           status: 'active',
           profileImage: null,
           notes: 'Handles financial reporting'
+        },
+        {
+          firstName: 'Frank',
+          lastName: 'Green',
+          email: 'finance.manager@company.com',
+          phone: '+1-555-0112',
+          password: 'Password123!',
+          departmentId: financeDeptId, // Finance
+          position: 'Finance Manager',
+          role: 'finance_manager',
+          controlPanel: 'finance-department',
+          status: 'active',
+          profileImage: null,
+          notes: 'Leads the finance department control panel'
         },
         {
           firstName: 'Tom',
@@ -197,6 +261,41 @@ export async function initializeStaffTable() {
         console.log('✅ Logistic user created successfully');
       } else {
         console.log('✅ Logistic user already exists');
+      }
+
+      // Check if finance manager user exists, if not create it
+      const financeDeptId = await ensureFinanceDepartment();
+
+      const [financeManager] = await pool.execute(
+        'SELECT id FROM staff WHERE email = ?',
+        ['finance.manager@company.com']
+      );
+
+      if (financeManager.length === 0) {
+        console.log('📝 Finance manager user not found, creating...');
+        const financeManagerData = {
+          firstName: 'Frank',
+          lastName: 'Green',
+          email: 'finance.manager@company.com',
+          phone: '+1-555-0112',
+          password: 'Password123!',
+          departmentId: financeDeptId, // Finance
+          position: 'Finance Manager',
+          role: 'finance_manager',
+          controlPanel: 'finance-department',
+          status: 'active',
+          profileImage: null,
+          notes: 'Leads the finance department control panel',
+        };
+
+        try {
+          await Staff.create(financeManagerData);
+          console.log('✅ Finance manager user created successfully');
+        } catch (err) {
+          console.error('❌ Failed to create finance manager user:', err.message);
+        }
+      } else {
+        console.log('✅ Finance manager user already exists');
       }
 
       // Check if department director user exists, if not create it

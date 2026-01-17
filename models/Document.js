@@ -56,68 +56,88 @@ class Document {
     uploadedByName,
     uploadDate
   }) {
-    const docId = documentId || await this.generateDocumentId();
-    const today = uploadDate || new Date().toISOString().split('T')[0];
+    try {
+      const docId = documentId || await this.generateDocumentId();
+      const today = uploadDate || new Date().toISOString().split('T')[0];
 
-    const [result] = await pool.execute(
-      `INSERT INTO documents (
-        document_id, project_id, name, description, file_type, file_size, file_data,
-        permissions, status, uploaded_by, uploaded_by_name, upload_date, last_modified
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        docId, projectId || null, name, description || null, fileType || null, fileSize || null,
-        fileData || null, permissions, status, uploadedBy || null, uploadedByName || null,
-        today, today
-      ]
-    );
+      // Set max_allowed_packet for large file uploads
+      try {
+        await pool.execute('SET SESSION max_allowed_packet = 300*1024*1024');
+      } catch (packetError) {
+        console.warn('Could not set max_allowed_packet:', packetError.message);
+      }
 
-    return await this.findById(result.insertId);
+      const [result] = await pool.execute(
+        `INSERT INTO documents (
+          document_id, project_id, name, description, file_type, file_size, file_data,
+          permissions, status, uploaded_by, uploaded_by_name, upload_date, last_modified
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          docId, projectId || null, name, description || null, fileType || null, fileSize || null,
+          fileData || null, permissions, status, uploadedBy || null, uploadedByName || null,
+          today, today
+        ]
+      );
+
+      return await this.findById(result.insertId);
+    } catch (error) {
+      console.error('Error in Document.create:', error);
+      console.error('Error stack:', error.stack);
+      throw error; // Re-throw to be handled by controller
+    }
   }
 
   static async findAll(filters = {}) {
-    let query = `
-      SELECT d.*, p.name as project_name, p.project_id as project_code
-      FROM documents d
-      LEFT JOIN projects p ON d.project_id = p.id
-      WHERE 1=1
-    `;
-    const params = [];
+    try {
+      let query = `
+        SELECT d.*, p.name as project_name, p.project_id as project_code
+        FROM documents d
+        LEFT JOIN projects p ON d.project_id = p.id
+        WHERE 1=1
+      `;
+      const params = [];
 
-    if (filters.search) {
-      query += ` AND (d.name LIKE ? OR d.description LIKE ? OR d.document_id LIKE ?)`;
-      const searchTerm = `%${filters.search}%`;
-      params.push(searchTerm, searchTerm, searchTerm);
+      if (filters.search) {
+        query += ` AND (d.name LIKE ? OR d.description LIKE ? OR d.document_id LIKE ?)`;
+        const searchTerm = `%${filters.search}%`;
+        params.push(searchTerm, searchTerm, searchTerm);
+      }
+
+      if (filters.projectId && filters.projectId !== null && filters.projectId !== undefined) {
+        query += ` AND d.project_id = ?`;
+        params.push(filters.projectId);
+      }
+
+      if (filters.status && filters.status !== 'all') {
+        query += ` AND d.status = ?`;
+        params.push(filters.status);
+      }
+
+      if (filters.fileType && filters.fileType !== 'all') {
+        query += ` AND d.file_type LIKE ?`;
+        params.push(`%${filters.fileType}%`);
+      }
+
+      query += ` ORDER BY d.upload_date DESC, d.created_at DESC`;
+
+      if (filters.limit) {
+        query += ` LIMIT ?`;
+        params.push(parseInt(filters.limit));
+      }
+
+      if (filters.offset) {
+        query += ` OFFSET ?`;
+        params.push(parseInt(filters.offset));
+      }
+
+      const [rows] = await pool.execute(query, params);
+      return rows.map(row => this.mapRowToDocument(row));
+    } catch (error) {
+      console.error('Error in Document.findAll:', error);
+      console.error('Error stack:', error.stack);
+      console.error('Filters:', filters);
+      throw error; // Re-throw to be handled by controller
     }
-
-    if (filters.projectId) {
-      query += ` AND d.project_id = ?`;
-      params.push(filters.projectId);
-    }
-
-    if (filters.status && filters.status !== 'all') {
-      query += ` AND d.status = ?`;
-      params.push(filters.status);
-    }
-
-    if (filters.fileType && filters.fileType !== 'all') {
-      query += ` AND d.file_type LIKE ?`;
-      params.push(`%${filters.fileType}%`);
-    }
-
-    query += ` ORDER BY d.upload_date DESC, d.created_at DESC`;
-
-    if (filters.limit) {
-      query += ` LIMIT ?`;
-      params.push(parseInt(filters.limit));
-    }
-
-    if (filters.offset) {
-      query += ` OFFSET ?`;
-      params.push(parseInt(filters.offset));
-    }
-
-    const [rows] = await pool.execute(query, params);
-    return rows.map(row => this.mapRowToDocument(row));
   }
 
   static async findById(id) {
@@ -173,26 +193,46 @@ class Document {
   }
 
   static async getStats(filters = {}) {
-    let query = `
-      SELECT 
-        COUNT(*) as total,
-        COUNT(CASE WHEN status = 'active' THEN 1 END) as active,
-        COUNT(CASE WHEN status = 'archived' THEN 1 END) as archived,
-        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
-        COUNT(CASE WHEN file_type LIKE '%pdf%' THEN 1 END) as pdf_count,
-        COUNT(CASE WHEN permissions = 'view_edit' THEN 1 END) as shared_count
-      FROM documents
-      WHERE 1=1
-    `;
-    const params = [];
+    try {
+      // Handle case where filters might be null or a number directly
+      const filterObj = typeof filters === 'object' && filters !== null ? filters : { projectId: filters || null };
+      
+      let query = `
+        SELECT 
+          COUNT(*) as total,
+          COUNT(CASE WHEN status = 'active' THEN 1 END) as active,
+          COUNT(CASE WHEN status = 'archived' THEN 1 END) as archived,
+          COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
+          COUNT(CASE WHEN file_type LIKE '%pdf%' THEN 1 END) as pdf_count,
+          COUNT(CASE WHEN permissions = 'view_edit' THEN 1 END) as shared_count
+        FROM documents
+        WHERE 1=1
+      `;
+      const params = [];
 
-    if (filters.projectId) {
-      query += ` AND project_id = ?`;
-      params.push(filters.projectId);
+      if (filterObj.projectId && filterObj.projectId !== null && filterObj.projectId !== undefined) {
+        query += ` AND project_id = ?`;
+        params.push(filterObj.projectId);
+      }
+
+      const [rows] = await pool.execute(query, params);
+      const result = rows[0] || { total: 0, active: 0, archived: 0, pending: 0, pdf_count: 0, shared_count: 0 };
+      
+      // Ensure all values are strings (as expected by frontend)
+      return {
+        total: String(result.total || 0),
+        active: String(result.active || 0),
+        archived: String(result.archived || 0),
+        pending: String(result.pending || 0),
+        pdf_count: String(result.pdf_count || 0),
+        shared_count: String(result.shared_count || 0)
+      };
+    } catch (error) {
+      console.error('Error in Document.getStats:', error);
+      console.error('Error stack:', error.stack);
+      // Return default stats on error
+      return { total: '0', active: '0', archived: '0', pending: '0', pdf_count: '0', shared_count: '0' };
     }
-
-    const [rows] = await pool.execute(query, params);
-    return rows[0];
   }
 
   static mapRowToDocument(row) {

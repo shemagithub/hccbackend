@@ -91,10 +91,20 @@ export class RoleController {
       });
     } catch (error) {
       console.error('Get roles error:', error);
+      
+      // Provide more specific error messages for connection issues
+      let errorMessage = 'Failed to fetch roles';
+      if (error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET' || error.code === 'PROTOCOL_CONNECTION_LOST') {
+        errorMessage = 'Database connection error. Please check if the database server is running.';
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
       res.status(500).json({
         success: false,
-        message: 'Failed to fetch roles',
-        error: error.message
+        message: errorMessage,
+        error: error.message,
+        code: error.code
       });
     }
   }

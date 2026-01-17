@@ -15,6 +15,10 @@ export class ExpenseController {
         expenseDate,
         status = 'pending',
         receiptPath,
+        receiptData,
+        receiptName,
+        receiptType,
+        receiptSize,
         vendor,
         invoiceNumber
       } = req.body;
@@ -58,6 +62,22 @@ export class ExpenseController {
         }
       }
 
+      console.log('Creating expense with data:', {
+        category,
+        description,
+        amount: parseFloat(amount),
+        currency,
+        expenseDate,
+        projectId: projectId || null,
+        status,
+        hasReceiptData: !!receiptData,
+        receiptName,
+        receiptType,
+        receiptSize,
+        vendor,
+        invoiceNumber
+      });
+
       const expense = await Expense.create({
         expenseId,
         projectId: projectId || null,
@@ -70,6 +90,10 @@ export class ExpenseController {
         submittedByName,
         status,
         receiptPath: receiptPath || null,
+        receiptData: receiptData || null,
+        receiptName: receiptName || null,
+        receiptType: receiptType || null,
+        receiptSize: receiptSize || null,
         vendor: vendor || null,
         invoiceNumber: invoiceNumber || null
       });
@@ -81,10 +105,33 @@ export class ExpenseController {
       });
     } catch (error) {
       console.error('Create expense error:', error);
+      console.error('Error stack:', error.stack);
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        sqlMessage: error.sqlMessage,
+        sqlState: error.sqlState
+      });
+      
+      // Provide user-friendly error messages
+      let errorMessage = 'Failed to create expense.';
+      if (error.code === 'ER_NET_PACKET_TOO_LARGE' || error.message?.includes('max_allowed_packet')) {
+        errorMessage = error.message || 'Receipt file is too large. Maximum file size is 200MB. Please upload a smaller file or contact your administrator.';
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
       res.status(500).json({
         success: false,
-        message: 'Failed to create expense.',
-        error: error.message
+        message: errorMessage,
+        error: error.message,
+        ...(process.env.NODE_ENV === 'development' && {
+          details: {
+            sqlMessage: error.sqlMessage,
+            sqlState: error.sqlState,
+            code: error.code
+          }
+        })
       });
     }
   }
@@ -164,16 +211,16 @@ export class ExpenseController {
         });
       }
 
-      // Try to find by database ID first
-      let expense = await Expense.findById(parseInt(id));
-      
-      // If not found by database ID, try to find by expense_id
-      if (!expense && isNaN(id)) {
-        // Query by expense_id
-        const expenses = await Expense.findAll({ search: id, limit: 1 });
-        if (expenses.length > 0 && expenses[0].id === id) {
-          expense = expenses[0];
-        }
+      let expense = null;
+
+      // If numeric, try database ID first
+      if (!Number.isNaN(Number(id))) {
+        expense = await Expense.findById(parseInt(id));
+      }
+
+      // If not found yet, try expense_id (e.g. "EXP-2026-0002")
+      if (!expense) {
+        expense = await Expense.findByExpenseId(id);
       }
 
       if (!expense) {

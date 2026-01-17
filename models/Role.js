@@ -30,48 +30,118 @@ class Role {
   }
 
   static async findAll(filters = {}) {
-    let query = `
-      SELECT r.*
-      FROM roles r
-    `;
-    
-    const conditions = [];
-    const params = [];
+    let connection = await pool.getConnection();
+    let connectionReleased = false;
+    try {
+      let query = `
+        SELECT r.*
+        FROM roles r
+      `;
+      
+      const conditions = [];
+      const params = [];
 
-    if (filters.search) {
-      conditions.push('(r.name LIKE ? OR r.description LIKE ?)');
-      params.push(`%${filters.search}%`, `%${filters.search}%`);
+      if (filters.search) {
+        conditions.push('(r.name LIKE ? OR r.description LIKE ?)');
+        params.push(`%${filters.search}%`, `%${filters.search}%`);
+      }
+
+      if (filters.status) {
+        conditions.push('r.status = ?');
+        params.push(filters.status);
+      }
+
+      if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+      }
+
+      query += ' ORDER BY r.created_at DESC';
+
+      if (filters.limit) {
+        query += ' LIMIT ?';
+        params.push(filters.limit);
+      }
+
+      if (filters.offset) {
+        query += ' OFFSET ?';
+        params.push(filters.offset);
+      }
+
+      const [rows] = await connection.execute(query, params);
+      connection.release();
+      connectionReleased = true;
+      
+      return rows.map(row => ({
+        ...row,
+        permissions: row.permissions ? JSON.parse(row.permissions) : [],
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }));
+    } catch (error) {
+      // If connection error, try once more with a new connection
+      if (error.code === 'ECONNRESET' || error.code === 'PROTOCOL_CONNECTION_LOST' || error.code === 'PROTOCOL_ENQUEUE_AFTER_QUIT' || error.code === 'ECONNREFUSED') {
+        try {
+          if (!connectionReleased) {
+            connection.release();
+            connectionReleased = true;
+          }
+          connection = await pool.getConnection();
+          let query = `
+            SELECT r.*
+            FROM roles r
+          `;
+          
+          const conditions = [];
+          const params = [];
+
+          if (filters.search) {
+            conditions.push('(r.name LIKE ? OR r.description LIKE ?)');
+            params.push(`%${filters.search}%`, `%${filters.search}%`);
+          }
+
+          if (filters.status) {
+            conditions.push('r.status = ?');
+            params.push(filters.status);
+          }
+
+          if (conditions.length > 0) {
+            query += ' WHERE ' + conditions.join(' AND ');
+          }
+
+          query += ' ORDER BY r.created_at DESC';
+
+          if (filters.limit) {
+            query += ' LIMIT ?';
+            params.push(filters.limit);
+          }
+
+          if (filters.offset) {
+            query += ' OFFSET ?';
+            params.push(filters.offset);
+          }
+
+          const [rows] = await connection.execute(query, params);
+          connection.release();
+          connectionReleased = true;
+          
+          return rows.map(row => ({
+            ...row,
+            permissions: row.permissions ? JSON.parse(row.permissions) : [],
+            createdAt: row.created_at,
+            updatedAt: row.updated_at
+          }));
+        } catch (retryError) {
+          if (!connectionReleased) {
+            connection.release();
+          }
+          throw retryError;
+        }
+      }
+      if (!connectionReleased) {
+        connection.release();
+      }
+      throw error;
     }
-
-    if (filters.status) {
-      conditions.push('r.status = ?');
-      params.push(filters.status);
-    }
-
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
-    }
-
-    query += ' ORDER BY r.created_at DESC';
-
-    if (filters.limit) {
-      query += ' LIMIT ?';
-      params.push(filters.limit);
-    }
-
-    if (filters.offset) {
-      query += ' OFFSET ?';
-      params.push(filters.offset);
-    }
-
-    const [rows] = await pool.execute(query, params);
-    
-    return rows.map(row => ({
-      ...row,
-      permissions: row.permissions ? JSON.parse(row.permissions) : [],
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    }));
   }
 
   static async findById(id) {
@@ -132,14 +202,50 @@ class Role {
   }
 
   static async getStats() {
-    const [rows] = await pool.execute(`
-      SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
-        SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) as inactive
-      FROM roles
-    `);
-    return rows[0];
+    let connection = await pool.getConnection();
+    let connectionReleased = false;
+    try {
+      const [rows] = await connection.execute(`
+        SELECT 
+          COUNT(*) as total,
+          SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
+          SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) as inactive
+        FROM roles
+      `);
+      connection.release();
+      connectionReleased = true;
+      return rows[0];
+    } catch (error) {
+      // If connection error, try once more with a new connection
+      if (error.code === 'ECONNRESET' || error.code === 'PROTOCOL_CONNECTION_LOST' || error.code === 'PROTOCOL_ENQUEUE_AFTER_QUIT' || error.code === 'ECONNREFUSED') {
+        try {
+          if (!connectionReleased) {
+            connection.release();
+            connectionReleased = true;
+          }
+          connection = await pool.getConnection();
+          const [rows] = await connection.execute(`
+            SELECT 
+              COUNT(*) as total,
+              SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
+              SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) as inactive
+            FROM roles
+          `);
+          connection.release();
+          connectionReleased = true;
+          return rows[0];
+        } catch (retryError) {
+          if (!connectionReleased) {
+            connection.release();
+          }
+          throw retryError;
+        }
+      }
+      if (!connectionReleased) {
+        connection.release();
+      }
+      throw error;
+    }
   }
 
   static async nameExists(name, excludeId = null) {

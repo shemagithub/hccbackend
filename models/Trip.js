@@ -118,6 +118,16 @@ class Trip {
       params.push(filters.vehicleId);
     }
 
+    if (filters.driverId) {
+      query += ` AND t.driver_id = ?`;
+      params.push(filters.driverId);
+    }
+
+    if (filters.driverEmail) {
+      query += ` AND s.email = ?`;
+      params.push(filters.driverEmail);
+    }
+
     if (filters.status && filters.status !== 'all') {
       query += ` AND t.status = ?`;
       params.push(filters.status);

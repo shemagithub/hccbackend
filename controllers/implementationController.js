@@ -1,4 +1,5 @@
 import Implementation from '../models/Implementation.js';
+import Staff from '../models/Staff.js';
 
 export class ImplementationController {
   // Create a new implementation
@@ -75,15 +76,54 @@ export class ImplementationController {
         priority,
         client,
         projectId,
+        department,
+        departmentId,
         page = 1,
-        limit = 50
+        limit = 50,
+        includeAll = false
       } = req.query;
+
+      // Get the logged-in user's email from staff ID
+      // Only filter by user if includeAll is not true
+      // SuperAdmin users always get all implementations regardless of includeAll flag
+      let userEmail = null;
+      let isSuperAdmin = false;
+      
+      // Check includeAll - it comes as a string from query params
+      const shouldIncludeAll = includeAll === 'true' || includeAll === true || includeAll === '1';
+      
+      if (req.staffId) {
+        try {
+          const staff = await Staff.findById(req.staffId);
+          if (staff) {
+            // Check if user is SuperAdmin or Finance - always give full access
+            const userRole = staff.role?.toLowerCase() || '';
+            if (userRole === 'superadmin' || userRole === 'finance') {
+              isSuperAdmin = true;
+              userEmail = null; // SuperAdmin and Finance get all implementations
+              console.log(`📋 getImplementations - ${staff.role} user detected, granting full access`);
+            } else if (!shouldIncludeAll && staff.email) {
+              // Regular users: filter by their email unless includeAll is true
+              userEmail = staff.email;
+              console.log(`📋 getImplementations - Filtering by user email: ${userEmail}`);
+            }
+          }
+        } catch (staffError) {
+          console.error('Error fetching staff info:', staffError);
+          // Continue without filtering if staff lookup fails
+        }
+      }
+      
+      console.log('📋 getImplementations - includeAll:', includeAll, 'shouldIncludeAll:', shouldIncludeAll, 'isSuperAdmin:', isSuperAdmin, 'userEmail:', userEmail);
 
       const filters = {
         status,
         priority,
         client,
         projectId: projectId ? parseInt(projectId) : undefined,
+        department,
+        departmentId: departmentId ? parseInt(departmentId) : undefined,
+        userEmail, // Filter by assigned user (null for SuperAdmin or when includeAll is true)
         limit: parseInt(limit),
         offset: (parseInt(page) - 1) * parseInt(limit)
       };

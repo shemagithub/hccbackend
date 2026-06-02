@@ -570,31 +570,30 @@ const startServer = async () => {
       await Responsibility.createTable();
       console.log('✅ Responsibilities table ready');
       console.log('✅ Drivers table ready');
-      
-      app.listen(PORT, () => {
-        console.log(`🚀 Server running on port ${PORT}`);
-        console.log(`🌐 API available at: http://localhost:${PORT}`);
-        console.log(`📊 Database: hcc`);
-        console.log(`🏢 Departments API: http://localhost:${PORT}/api/departments`);
-        console.log(`👥 Roles API: http://localhost:${PORT}/api/roles`);
-        console.log(`👤 Staff API: http://localhost:${PORT}/api/staff`);
-        console.log(`💬 Messages API: http://localhost:${PORT}/api/messages`);
-        console.log(`🎯 Opportunities API: http://localhost:${PORT}/api/opportunities`);
-        console.log(`📋 Projects API: http://localhost:${PORT}/api/projects`);
-        console.log(`👔 Clients API: http://localhost:${PORT}/api/clients`);
-        console.log(`🚗 Vehicles API: http://localhost:${PORT}/api/vehicles`);
-        console.log(`📝 Tasks API: http://localhost:${PORT}/api/tasks`);
-        console.log(`📄 Documents API: http://localhost:${PORT}/api/documents`);
-        console.log(`💭 Discussions API: http://localhost:${PORT}/api/discussions`);
-        console.log(`📝 EOIs API: http://localhost:${PORT}/api/eois`);
-        console.log(`💰 Budgets API: http://localhost:${PORT}/api/budgets`);
-        console.log(`📄 Invoices API: http://localhost:${PORT}/api/invoices`);
-      });
     } else {
-      console.error('\n❌ Failed to connect to database. Server startup aborted.');
-      console.error('   Please ensure MySQL server is running and try again.\n');
-      process.exit(1);
+      console.error('\n❌ Failed to connect to database.');
+      console.error('   The API server will still start, but endpoints may fail until MySQL is reachable.\n');
     }
+
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`🌐 API available at: http://localhost:${PORT}`);
+      console.log(`📊 Database: hcc`);
+      console.log(`🏢 Departments API: http://localhost:${PORT}/api/departments`);
+      console.log(`👥 Roles API: http://localhost:${PORT}/api/roles`);
+      console.log(`👤 Staff API: http://localhost:${PORT}/api/staff`);
+      console.log(`💬 Messages API: http://localhost:${PORT}/api/messages`);
+      console.log(`🎯 Opportunities API: http://localhost:${PORT}/api/opportunities`);
+      console.log(`📋 Projects API: http://localhost:${PORT}/api/projects`);
+      console.log(`👔 Clients API: http://localhost:${PORT}/api/clients`);
+      console.log(`🚗 Vehicles API: http://localhost:${PORT}/api/vehicles`);
+      console.log(`📝 Tasks API: http://localhost:${PORT}/api/tasks`);
+      console.log(`📄 Documents API: http://localhost:${PORT}/api/documents`);
+      console.log(`💭 Discussions API: http://localhost:${PORT}/api/discussions`);
+      console.log(`📝 EOIs API: http://localhost:${PORT}/api/eois`);
+      console.log(`💰 Budgets API: http://localhost:${PORT}/api/budgets`);
+      console.log(`📄 Invoices API: http://localhost:${PORT}/api/invoices`);
+    });
   } catch (error) {
     console.error('❌ Server startup failed:', error.message);
     process.exit(1);

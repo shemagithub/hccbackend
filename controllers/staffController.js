@@ -451,6 +451,13 @@ export class StaffController {
     } catch (error) {
       console.error('[AUTH] Authentication error:', error);
       console.error('[AUTH] Error stack:', error.stack);
+      if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+        return res.status(503).json({
+          success: false,
+          message: 'Database is unavailable. Please try again in a moment.',
+          error: error.message
+        });
+      }
       res.status(500).json({
         success: false,
         message: 'Authentication failed',

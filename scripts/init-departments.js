@@ -1,4 +1,5 @@
 import { pool } from '../config/db.js';
+import { ensurePrimaryKey } from './ensure-primary-key.js';
 
 const createDepartmentsTable = async () => {
   try {
@@ -30,6 +31,51 @@ const createDepartmentsTable = async () => {
     console.log('✅ Departments table created successfully');
   } catch (error) {
     console.error('❌ Failed to create departments table:', error.message);
+    throw error;
+  }
+};
+
+/**
+ * Add department-specific indexes after the shared primary-key repair.
+ */
+const ensureDepartmentsSchema = async () => {
+  try {
+    await ensurePrimaryKey('departments');
+
+    const [primaryKey] = await pool.execute(
+      "SHOW INDEX FROM departments WHERE Key_name = 'PRIMARY'"
+    );
+    if (primaryKey.length === 0) {
+      return;
+    }
+
+    await pool.execute(`
+      DELETE t1 FROM departments t1
+      INNER JOIN departments t2
+      ON t1.department_code = t2.department_code AND t1.id > t2.id
+    `);
+
+    const indexDefinitions = [
+      { name: 'idx_department_code', sql: 'ADD UNIQUE INDEX idx_department_code (department_code)' },
+      { name: 'idx_status', sql: 'ADD INDEX idx_status (status)' },
+      { name: 'idx_location', sql: 'ADD INDEX idx_location (location)' },
+      { name: 'idx_name', sql: 'ADD INDEX idx_name (name)' },
+      { name: 'idx_created_at', sql: 'ADD INDEX idx_created_at (created_at)' },
+    ];
+
+    for (const { name, sql } of indexDefinitions) {
+      const [existing] = await pool.execute(
+        'SHOW INDEX FROM departments WHERE Key_name = ?',
+        [name]
+      );
+      if (existing.length === 0) {
+        await pool.execute(`ALTER TABLE departments ${sql}`);
+      }
+    }
+
+    console.log('✅ Departments indexes ready');
+  } catch (error) {
+    console.error('❌ Failed to repair departments table schema:', error.message);
     throw error;
   }
 };
@@ -174,6 +220,7 @@ const insertSampleData = async () => {
 const initializeDepartments = async () => {
   try {
     await createDepartmentsTable();
+    await ensureDepartmentsSchema();
     await insertSampleData();
     console.log('🎉 Departments module initialized successfully');
   } catch (error) {

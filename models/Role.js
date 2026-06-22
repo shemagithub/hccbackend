@@ -14,8 +14,10 @@ class Role {
         user_count INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL
-      )
+        INDEX idx_roles_department_id (department_id),
+        CONSTRAINT fk_roles_department
+          FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     await pool.execute(query);
     console.log('Roles table created or already exists.');

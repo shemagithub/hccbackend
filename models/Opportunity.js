@@ -206,9 +206,27 @@ class Opportunity {
     }
   }
 
+  /** List query — excludes LONGTEXT documents to keep responses fast */
+  static LIST_SELECT = `
+    id, opportunity_id, department, country, name, legal_entity, client, contact,
+    description, feedback_deadline, operation_date, win_probability, bid_currency,
+    fund_agency, urgency, comment, year, status, decision, value, expected_close_date,
+    assigned_to, created_at, updated_at,
+    (supporting_document IS NOT NULL AND CHAR_LENGTH(supporting_document) > 0) AS has_supporting_document,
+    (win_probability_document IS NOT NULL AND CHAR_LENGTH(win_probability_document) > 0) AS has_win_probability_document
+  `;
+
   static async findAll(filters = {}) {
-    let query = `SELECT * FROM opportunities WHERE 1=1`;
+    let query = `SELECT ${this.LIST_SELECT} FROM opportunities WHERE 1=1`;
     const params = [];
+
+    if (filters.pipelineStage === 'active') {
+      query += ` AND status IN ('open', 'qualified')`;
+    } else if (filters.pipelineStage === 'proposals') {
+      query += ` AND status = 'proposal' AND id NOT IN (
+        SELECT opportunity_id FROM opportunity_proposals WHERE implementation_id IS NOT NULL
+      )`;
+    }
 
     // Filter by assigned user email (if provided)
     // assigned_to is a comma-separated string of emails
@@ -277,23 +295,87 @@ class Opportunity {
     }
 
     const [rows] = await pool.execute(query, params);
-    return rows.map(row => this.mapRowToOpportunity(row));
+    return rows.map((row) => this.mapRowToOpportunity(row, { forList: true }));
   }
 
-  static async findById(id) {
-    const [rows] = await pool.execute('SELECT * FROM opportunities WHERE id = ?', [id]);
+  static async findById(id, options = {}) {
+    const { excludeDocuments = false } = options;
+    const query = excludeDocuments
+      ? `SELECT
+          id,
+          opportunity_id,
+          department,
+          country,
+          name,
+          legal_entity,
+          client,
+          contact,
+          description,
+          feedback_deadline,
+          operation_date,
+          win_probability,
+          (win_probability_document IS NOT NULL AND LENGTH(win_probability_document) > 0) AS has_win_probability_document,
+          bid_currency,
+          fund_agency,
+          urgency,
+          (supporting_document IS NOT NULL AND LENGTH(supporting_document) > 0) AS has_supporting_document,
+          comment,
+          year,
+          status,
+          decision,
+          value,
+          expected_close_date,
+          assigned_to,
+          created_at,
+          updated_at
+        FROM opportunities
+        WHERE id = ?`
+      : 'SELECT * FROM opportunities WHERE id = ?';
+    const [rows] = await pool.execute(query, [id]);
     
     if (rows.length === 0) return null;
     
-    return this.mapRowToOpportunity(rows[0]);
+    return this.mapRowToOpportunity(rows[0], { forList: excludeDocuments });
   }
 
-  static async findByOpportunityId(opportunityId) {
-    const [rows] = await pool.execute('SELECT * FROM opportunities WHERE opportunity_id = ?', [opportunityId]);
+  static async findByOpportunityId(opportunityId, options = {}) {
+    const { excludeDocuments = false } = options;
+    const query = excludeDocuments
+      ? `SELECT
+          id,
+          opportunity_id,
+          department,
+          country,
+          name,
+          legal_entity,
+          client,
+          contact,
+          description,
+          feedback_deadline,
+          operation_date,
+          win_probability,
+          (win_probability_document IS NOT NULL AND LENGTH(win_probability_document) > 0) AS has_win_probability_document,
+          bid_currency,
+          fund_agency,
+          urgency,
+          (supporting_document IS NOT NULL AND LENGTH(supporting_document) > 0) AS has_supporting_document,
+          comment,
+          year,
+          status,
+          decision,
+          value,
+          expected_close_date,
+          assigned_to,
+          created_at,
+          updated_at
+        FROM opportunities
+        WHERE opportunity_id = ?`
+      : 'SELECT * FROM opportunities WHERE opportunity_id = ?';
+    const [rows] = await pool.execute(query, [opportunityId]);
     
     if (rows.length === 0) return null;
     
-    return this.mapRowToOpportunity(rows[0]);
+    return this.mapRowToOpportunity(rows[0], { forList: excludeDocuments });
   }
 
   static async update(id, updateData) {
@@ -335,6 +417,18 @@ class Opportunity {
     if (updateFields.length === 0) return false;
 
     params.push(id);
+
+    const hasLargeDocumentFields = ['winProbabilityDocument', 'supportingDocument'].some(
+      (field) => updateData[field] !== undefined
+    );
+
+    if (!hasLargeDocumentFields) {
+      const [result] = await pool.execute(
+        `UPDATE opportunities SET ${updateFields.join(', ')}, updated_at = NOW() WHERE id = ?`,
+        params
+      );
+      return result.affectedRows > 0;
+    }
     
     // Use getConnection pattern for better error handling with retry logic
     let connection = null;
@@ -509,7 +603,11 @@ class Opportunity {
     return rows[0];
   }
 
-  static mapRowToOpportunity(row) {
+  static mapRowToOpportunity(row, options = {}) {
+    const { forList = false } = options;
+    const hasSupportingDocument = Boolean(row.has_supporting_document);
+    const hasWinProbabilityDocument = Boolean(row.has_win_probability_document);
+
     return {
       id: row.opportunity_id,
       dbId: row.id,
@@ -523,11 +621,15 @@ class Opportunity {
       feedbackDeadline: row.feedback_deadline ? row.feedback_deadline.toISOString().split('T')[0] : null,
       operationDate: row.operation_date ? row.operation_date.toISOString().split('T')[0] : null,
       winProbability: row.win_probability,
-      winProbabilityDocument: row.win_probability_document,
+      winProbabilityDocument: forList
+        ? null
+        : row.win_probability_document,
+      hasWinProbabilityDocument: forList ? hasWinProbabilityDocument : undefined,
       bidCurrency: row.bid_currency,
       fundAgency: row.fund_agency,
       urgency: row.urgency,
-      supportingDocument: row.supporting_document,
+      supportingDocument: forList ? null : row.supporting_document,
+      hasSupportingDocument: forList ? hasSupportingDocument : undefined,
       comment: row.comment,
       year: row.year,
       status: row.status,

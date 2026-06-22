@@ -47,6 +47,15 @@ async function ensureFinanceDepartment() {
   return result.insertId;
 }
 
+async function resolveDepartmentId(departmentId) {
+  if (departmentId == null) return null;
+  const [rows] = await pool.execute(
+    'SELECT id FROM departments WHERE id = ? LIMIT 1',
+    [departmentId]
+  );
+  return rows.length > 0 ? rows[0].id : null;
+}
+
 export async function initializeStaffTable() {
   try {
     console.log('Initializing staff table...');
@@ -228,7 +237,10 @@ export async function initializeStaffTable() {
       
       // Insert sample staff
       for (const staff of sampleStaff) {
-        await Staff.create(staff);
+        await Staff.create({
+          ...staff,
+          departmentId: await resolveDepartmentId(staff.departmentId),
+        });
       }
       
       console.log(`✅ Inserted ${sampleStaff.length} sample staff members`);
@@ -249,7 +261,7 @@ export async function initializeStaffTable() {
           email: 'robert.taylor@company.com',
           phone: '+1-555-0111',
           password: 'Password123!',
-          departmentId: 6, // Operations
+          departmentId: await resolveDepartmentId(6),
           position: 'Logistics Manager',
           role: 'Logistic',
           status: 'active',

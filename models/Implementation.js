@@ -1,4 +1,6 @@
 import pool from '../config/db.js';
+import Project from './Project.js';
+import Staff from './Staff.js';
 
 class Implementation {
   static async createTable() {
@@ -188,6 +190,101 @@ class Implementation {
     return this.mapRowToImplementation(rows[0]);
   }
 
+  static async findByProjectId(projectRef) {
+    const numericId = parseInt(projectRef, 10);
+    let projectDbId = null;
+
+    if (!Number.isNaN(numericId)) {
+      const [byFk] = await pool.execute(
+        `SELECT i.*, p.name as project_name, p.department as project_department
+         FROM implementations i
+         LEFT JOIN projects p ON i.project_id = p.id
+         WHERE i.project_id = ?`,
+        [numericId]
+      );
+      if (byFk.length > 0) {
+        return this.mapRowToImplementation(byFk[0]);
+      }
+      projectDbId = numericId;
+    }
+
+    const project =
+      (projectDbId ? await Project.findById(projectDbId) : null) ||
+      (typeof projectRef === 'string' ? await Project.findByProjectId(projectRef) : null);
+
+    if (!project?.dbId) {
+      return null;
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT i.*, p.name as project_name, p.department as project_department
+       FROM implementations i
+       LEFT JOIN projects p ON i.project_id = p.id
+       WHERE i.project_id = ?`,
+      [project.dbId]
+    );
+
+    if (rows.length === 0) return null;
+    return this.mapRowToImplementation(rows[0]);
+  }
+
+  static mapProjectStatusToImplementation(status) {
+    const map = {
+      planning: 'planning',
+      ongoing: 'in_progress',
+      near_completion: 'in_progress',
+      completed: 'completed',
+      on_hold: 'on_hold',
+      overdue: 'in_progress',
+      cancelled: 'on_hold',
+    };
+    return map[status] || 'planning';
+  }
+
+  /** Ensure a project record has a linked implementation row for the pipeline workspace. */
+  static async ensureLinkedImplementation(projectRef) {
+    let project = null;
+    const numericId = parseInt(projectRef, 10);
+
+    if (!Number.isNaN(numericId)) {
+      project = await Project.findById(numericId);
+    }
+    if (!project && typeof projectRef === 'string') {
+      project = await Project.findByProjectId(projectRef);
+    }
+    if (!project) {
+      throw new Error('Project not found');
+    }
+
+    const existing = await this.findByProjectId(project.dbId);
+    if (existing) {
+      return { implementation: existing, project };
+    }
+
+    const implementation = await this.create({
+      projectId: project.dbId,
+      title: project.name,
+      client: project.client,
+      description: project.description || null,
+      startDate: project.startDate,
+      endDate: project.endDate,
+      status: this.mapProjectStatusToImplementation(project.status),
+      progress: project.progress || 0,
+      budget: project.budget || 0,
+      spent: project.spent || 0,
+      assignedTo: project.assignedTo || null,
+      teamSize: project.teamSize || 0,
+      priority: project.priority || 'medium',
+    });
+
+    return { implementation, project };
+  }
+
+  static async getWorkspaceByProject(projectRef) {
+    const { implementation } = await this.ensureLinkedImplementation(projectRef);
+    return this.getWorkspace(implementation.dbId);
+  }
+
   static async update(id, updateData) {
     const updateFields = [];
     const params = [];
@@ -275,6 +372,173 @@ class Implementation {
       total_budget: 0,
       total_spent: 0,
       avg_progress: 0
+    };
+  }
+
+  /** Create an implementation record when an EOI or proposal is awarded. Also provisions a linked project. */
+  static async createFromAwarded({
+    title,
+    client,
+    description,
+    startDate,
+    endDate,
+    budget = 0,
+    assignedTo,
+    createdBy,
+    department = null,
+    manager = null,
+  }) {
+    if (!title || !client || !startDate || !endDate) {
+      throw new Error('Title, client, start date, and due date are required to start implementation');
+    }
+
+    if (new Date(startDate) > new Date(endDate)) {
+      throw new Error('Due date must be on or after the start date');
+    }
+
+    const teamSize = assignedTo
+      ? assignedTo.split(',').map((item) => item.trim()).filter(Boolean).length
+      : 0;
+
+    const resolvedManager = manager || (await this.resolveManagerName(assignedTo, createdBy));
+
+    const project = await Project.create({
+      name: title,
+      client,
+      department,
+      manager: resolvedManager,
+      status: 'planning',
+      startDate,
+      endDate,
+      progress: 0,
+      budget: parseFloat(budget) || 0,
+      spent: 0,
+      teamSize,
+      priority: 'medium',
+      description: description || null,
+      assignedTo: assignedTo || null,
+    });
+
+    return this.create({
+      projectId: project.dbId,
+      title,
+      client,
+      description: description || null,
+      startDate,
+      endDate,
+      status: 'planning',
+      progress: 0,
+      budget: parseFloat(budget) || 0,
+      spent: 0,
+      assignedTo: assignedTo || null,
+      teamSize,
+      priority: 'medium',
+      createdBy: createdBy || null,
+    });
+  }
+
+  static async resolveManagerName(assignedTo, createdBy) {
+    if (createdBy) {
+      try {
+        const staff = await Staff.findById(createdBy);
+        if (staff?.firstName) {
+          return `${staff.firstName} ${staff.lastName || ''}`.trim();
+        }
+      } catch {
+        // fall through
+      }
+    }
+    if (assignedTo) {
+      const first = assignedTo.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    return 'Project Manager';
+  }
+
+  /** Ensure every implementation has a linked project record for PM features (tasks, deliverables, etc.). */
+  static async ensureLinkedProject(implementationDbId) {
+    const impl = await this.findById(implementationDbId);
+    if (!impl) {
+      throw new Error('Implementation not found');
+    }
+
+    if (impl.projectId) {
+      const project = await Project.findById(impl.projectId);
+      if (project) {
+        return { implementation: impl, project };
+      }
+    }
+
+    const manager = await this.resolveManagerName(impl.assignedTo, impl.createdBy);
+    const project = await Project.create({
+      name: impl.title,
+      client: impl.client,
+      department: impl.projectDepartment || null,
+      manager,
+      status: impl.status === 'completed' ? 'completed' : impl.status === 'on_hold' ? 'on_hold' : 'ongoing',
+      startDate: impl.startDate,
+      endDate: impl.endDate,
+      progress: impl.progress || 0,
+      budget: impl.budget || 0,
+      spent: impl.spent || 0,
+      teamSize: impl.teamSize || 0,
+      priority: impl.priority || 'medium',
+      description: impl.description || null,
+      assignedTo: impl.assignedTo || null,
+    });
+
+    const updated = await this.update(implementationDbId, { projectId: project.dbId });
+    return { implementation: updated || { ...impl, projectId: project.dbId }, project };
+  }
+
+  /** Load implementation + linked project + live counts for the management workspace. */
+  static async getWorkspace(implementationDbId) {
+    const { implementation, project } = await this.ensureLinkedProject(implementationDbId);
+    const projectId = project.dbId;
+
+    const [[taskRow], [deliverableRow], [expenseRow], [riskRow], [openTaskRow]] = await Promise.all([
+      pool.execute('SELECT COUNT(*) AS count FROM tasks WHERE project_id = ?', [projectId]),
+      pool.execute('SELECT COUNT(*) AS count FROM deliverables WHERE project_id = ?', [projectId]),
+      pool.execute(
+        'SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count FROM expenses WHERE project_id = ?',
+        [projectId]
+      ),
+      pool.execute('SELECT COUNT(*) AS count FROM risks WHERE project_id = ?', [projectId]),
+      pool.execute(
+        "SELECT COUNT(*) AS count FROM tasks WHERE project_id = ? AND status NOT IN ('completed', 'cancelled')",
+        [projectId]
+      ),
+    ]);
+
+    const spent = parseFloat(expenseRow[0]?.total || 0);
+    const budget = parseFloat(project.budget || implementation.budget || 0);
+    const taskCount = taskRow[0]?.count || 0;
+    const completedTasks = taskCount - (openTaskRow[0]?.count || 0);
+    const progress =
+      taskCount > 0 ? Math.min(100, Math.round((completedTasks / taskCount) * 100)) : implementation.progress || 0;
+
+    if (spent !== implementation.spent || progress !== implementation.progress) {
+      await this.update(implementationDbId, { spent, progress });
+      await Project.update(projectId, { spent, progress });
+    }
+
+    const refreshedImpl = (await this.findById(implementationDbId)) || implementation;
+    const refreshedProject = (await Project.findById(projectId)) || project;
+
+    return {
+      implementation: refreshedImpl,
+      project: refreshedProject,
+      stats: {
+        tasks: taskCount,
+        openTasks: openTaskRow[0]?.count || 0,
+        deliverables: deliverableRow[0]?.count || 0,
+        expenses: expenseRow[0]?.count || 0,
+        expenseTotal: spent,
+        risks: riskRow[0]?.count || 0,
+        budget,
+        budgetUsedPercent: budget > 0 ? Math.round((spent / budget) * 100) : 0,
+        progress,
+      },
     };
   }
 }

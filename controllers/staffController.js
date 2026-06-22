@@ -381,7 +381,13 @@ export class StaffController {
   // Authenticate staff member
   static async authenticate(req, res) {
     try {
-      const { email, password } = req.body;
+      let { email, password } = req.body || {};
+
+      // Support urlencoded fallback if a proxy strips JSON Content-Type
+      if ((!email || !password) && typeof req.body === 'object' && req.body !== null) {
+        email = email || req.body.email;
+        password = password || req.body.password;
+      }
 
       // Log authentication attempt (without password)
       console.log(`[AUTH] Authentication attempt for email: ${email}`);

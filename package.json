@@ -21,7 +21,7 @@
     "add-multiple-assignees-to-tasks": "node scripts/add-multiple-assignees-to-tasks.js",
     "add-message-types-to-discussions": "node scripts/add-message-types-to-discussions.js",
     "add-reply-edit-pin-to-discussions": "node scripts/add-reply-edit-pin-to-discussions.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "create-receptionist-user": "node scripts/create-receptionist-user.js",
   },
   "keywords": [
     "hcc",

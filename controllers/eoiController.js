@@ -1,4 +1,21 @@
 import EOI from '../models/EOI.js';
+import Implementation from '../models/Implementation.js';
+
+const VALID_DECISIONS = ['pending', 'under_review', 'awarded', 'rejected', 'cancelled'];
+
+function validateAwardedDecision(updateData) {
+  if (updateData.decision !== 'awarded') return null;
+
+  if (!updateData.implementationStartDate || !updateData.implementationDueDate) {
+    return 'Start date and due date are required when decision is Awarded';
+  }
+
+  if (new Date(updateData.implementationStartDate) > new Date(updateData.implementationDueDate)) {
+    return 'Due date must be on or after the start date';
+  }
+
+  return null;
+}
 
 export class EOIController {
   // Create a new EOI
@@ -65,12 +82,14 @@ export class EOIController {
         status,
         search,
         page = 1,
-        limit = 50
+        limit = 50,
+        excludeImplemented = 'true'
       } = req.query;
 
       const filters = {
         status,
         search,
+        excludeImplemented,
         limit: parseInt(limit),
         offset: (parseInt(page) - 1) * parseInt(limit)
       };
@@ -152,6 +171,25 @@ export class EOIController {
         });
       }
 
+      if (updateData.decision !== undefined && !VALID_DECISIONS.includes(updateData.decision)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid decision value',
+        });
+      }
+
+      const mergedDecisionData = {
+        decision: updateData.decision ?? eoi.decision,
+        implementationStartDate:
+          updateData.implementationStartDate ?? eoi.implementationStartDate,
+        implementationDueDate:
+          updateData.implementationDueDate ?? eoi.implementationDueDate,
+      };
+      const awardedError = validateAwardedDecision(mergedDecisionData);
+      if (awardedError) {
+        return res.status(400).json({ success: false, message: awardedError });
+      }
+
       const updatedEOI = await EOI.update(eoi.dbId, updateData);
 
       res.json({
@@ -165,6 +203,79 @@ export class EOIController {
         success: false,
         message: 'Failed to update EOI',
         error: error.message
+      });
+    }
+  }
+
+  static async startImplementation(req, res) {
+    try {
+      const { id } = req.params;
+      await EOI.ensureAwardedFields();
+
+      let eoi = await EOI.findById(parseInt(id, 10));
+      if (!eoi) {
+        eoi = await EOI.findByEOIId(id);
+      }
+
+      if (!eoi) {
+        return res.status(404).json({ success: false, message: 'EOI not found' });
+      }
+
+      if (eoi.decision !== 'awarded') {
+        return res.status(400).json({
+          success: false,
+          message: 'Implementation can only be started when the EOI decision is Awarded',
+        });
+      }
+
+      if (!eoi.implementationStartDate || !eoi.implementationDueDate) {
+        return res.status(400).json({
+          success: false,
+          message: 'Save implementation start date and due date before starting',
+        });
+      }
+
+      if (eoi.implementationId) {
+        const existing = await Implementation.findById(eoi.implementationId);
+        if (existing) {
+          return res.json({
+            success: true,
+            message: 'Implementation already started',
+            data: { eoi, implementation: existing },
+          });
+        }
+      }
+
+      const implementation = await Implementation.createFromAwarded({
+        title: eoi.title,
+        client: eoi.organization,
+        description: eoi.description,
+        startDate: eoi.implementationStartDate,
+        endDate: eoi.implementationDueDate,
+        budget: eoi.value,
+        assignedTo: eoi.assignedTo,
+        createdBy: req.staffId || null,
+      });
+
+      const updatedEOI = await EOI.update(eoi.dbId, {
+        implementationId: implementation.dbId,
+        status: 'accepted',
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Implementation started successfully',
+        data: {
+          eoi: updatedEOI,
+          implementation,
+        },
+      });
+    } catch (error) {
+      console.error('Start EOI implementation error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to start implementation',
+        error: error.message,
       });
     }
   }

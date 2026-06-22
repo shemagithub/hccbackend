@@ -3,6 +3,10 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+/** 256MB server default is sufficient for large uploads (350mb express limit uses session override). */
+const MIN_RECOMMENDED_PACKET_BYTES = 256 * 1024 * 1024;
+const SESSION_PACKET_BYTES = 268435456; // 256MB — matches typical shared-hosting GLOBAL limit
+
 const dbConfig = {
   host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT) || 3306,
@@ -15,13 +19,45 @@ const dbConfig = {
   queueLimit: 0,
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
-  // Note: max_allowed_packet is a server-level setting (GLOBAL)
-  // It cannot be set per connection, but new connections will use the GLOBAL value
-  // Run: npm run set-max-allowed-packet to set GLOBAL max_allowed_packet to 300MB
+};
+
+/** Server connection config (no database — used to create DB if missing). */
+const serverConfig = {
+  host: dbConfig.host,
+  port: dbConfig.port,
+  user: dbConfig.user,
+  password: dbConfig.password,
+  connectTimeout: dbConfig.connectTimeout,
 };
 
 // Create connection pool
 const pool = mysql.createPool(dbConfig);
+
+let packetWarningLogged = false;
+
+/**
+ * Create the application database if it does not exist.
+ * Connects to MySQL without selecting a database first.
+ */
+const ensureDatabase = async () => {
+  let connection;
+  try {
+    connection = await mysql.createConnection(serverConfig);
+    const dbName = dbConfig.database;
+    await connection.execute(
+      `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+    );
+    console.log(`✅ Database '${dbName}' created/verified`);
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to ensure database exists:', error.message);
+    return false;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+};
 
 // Handle pool errors
 pool.on('error', (err) => {
@@ -33,67 +69,66 @@ pool.on('error', (err) => {
   }
 });
 
-// Add a hook to verify max_allowed_packet on connection (for debugging)
-pool.on('connection', async (connection) => {
-  try {
-    const [rows] = await connection.query("SHOW VARIABLES LIKE 'max_allowed_packet'");
-    if (rows.length > 0) {
-      const packetSize = parseInt(rows[0].Value);
-      const packetSizeMB = (packetSize / 1024 / 1024).toFixed(2);
-      if (packetSize < 314572800) { // Less than 300MB
-        console.warn(`⚠️  Connection max_allowed_packet is ${packetSizeMB}MB (should be 300MB). Run: npm run set-max-allowed-packet`);
-      }
-    }
-  } catch (err) {
-    // Ignore if we can't check
-  }
+// Set SESSION packet size once per new pool connection (quiet if GLOBAL is already 256MB)
+pool.on('connection', (connection) => {
+  connection.promise()
+    .execute(`SET SESSION max_allowed_packet = ${SESSION_PACKET_BYTES}`)
+    .catch(() => {});
 });
-
-// Note: max_allowed_packet is set at MySQL server level (GLOBAL)
-// Run: npm run set-max-allowed-packet to set it to 300MB (to support 200MB files)
-// New connections will automatically use the GLOBAL setting
 
 // Test database connection with retry logic
 const testConnection = async (retries = 3, delay = 2000) => {
+  let ensuredDatabase = false;
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const connection = await pool.getConnection();
       console.log('✅ MySQL database connected successfully');
       console.log(`📊 Connected to database: ${dbConfig.database} at ${dbConfig.host}:${dbConfig.port}`);
-      
-      // Set SESSION max_allowed_packet for this connection (300MB = 314572800 bytes)
+
       try {
-        await connection.execute("SET SESSION max_allowed_packet = 314572800");
-      } catch (err) {
-        // Ignore if we can't set it
+        await connection.execute(`SET SESSION max_allowed_packet = ${SESSION_PACKET_BYTES}`);
+      } catch {
+        // Ignore if hosting disallows SESSION override
       }
-      
-      // Verify max_allowed_packet setting
+
       try {
         const [rows] = await connection.query("SHOW VARIABLES LIKE 'max_allowed_packet'");
         if (rows.length > 0) {
-          const packetSize = parseInt(rows[0].Value);
+          const packetSize = parseInt(rows[0].Value, 10);
           const packetSizeMB = (packetSize / 1024 / 1024).toFixed(2);
           console.log(`📦 max_allowed_packet: ${packetSizeMB} MB`);
-          if (packetSize < 314572800) {
-            console.warn('⚠️  max_allowed_packet is less than 300MB. Run: npm run set-max-allowed-packet');
+          if (packetSize < MIN_RECOMMENDED_PACKET_BYTES && !packetWarningLogged) {
+            packetWarningLogged = true;
+            console.warn(
+              `⚠️  max_allowed_packet is ${packetSizeMB}MB (< 256MB). Large file uploads may fail. Ask host to raise GLOBAL max_allowed_packet or run: npm run set-max-allowed-packet`,
+            );
           }
         }
-      } catch (err) {
+      } catch {
         // Ignore if we can't check
       }
-      
+
       connection.release();
       return true;
     } catch (error) {
       const errorCode = error.code || 'UNKNOWN';
       const errorMessage = error.message || 'Unknown error';
-      
+
+      if (errorCode === 'ER_BAD_DB_ERROR' && !ensuredDatabase) {
+        console.log(`📦 Database "${dbConfig.database}" not found — creating it...`);
+        ensuredDatabase = await ensureDatabase();
+        if (ensuredDatabase) {
+          console.log('🔄 Retrying connection...');
+          continue;
+        }
+      }
+
       if (attempt < retries) {
         console.warn(`⚠️  Database connection attempt ${attempt}/${retries} failed: ${errorCode} - ${errorMessage}`);
         console.log(`🔄 Retrying in ${delay / 1000} seconds...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delay *= 2; // Exponential backoff
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= 2;
       } else {
         console.error('❌ Database connection failed after all retries');
         console.error(`   Error Code: ${errorCode}`);
@@ -101,8 +136,7 @@ const testConnection = async (retries = 3, delay = 2000) => {
         console.error(`   Host: ${dbConfig.host}:${dbConfig.port}`);
         console.error(`   Database: ${dbConfig.database}`);
         console.error(`   User: ${dbConfig.user}`);
-        
-        // Provide helpful error messages based on error code
+
         if (errorCode === 'ECONNREFUSED') {
           console.error('\n💡 Troubleshooting tips:');
           console.error('   1. Make sure MySQL server is running');
@@ -117,9 +151,9 @@ const testConnection = async (retries = 3, delay = 2000) => {
         } else if (errorCode === 'ER_BAD_DB_ERROR') {
           console.error('\n💡 Troubleshooting tips:');
           console.error('   1. Database "' + dbConfig.database + '" does not exist');
-          console.error('   2. Create the database: CREATE DATABASE ' + dbConfig.database + ';');
+          console.error('   2. Ensure the MySQL user can CREATE DATABASE');
         }
-        
+
         return false;
       }
     }
@@ -127,6 +161,5 @@ const testConnection = async (retries = 3, delay = 2000) => {
   return false;
 };
 
-export { pool, testConnection };
+export { pool, testConnection, ensureDatabase, dbConfig };
 export default pool;
-

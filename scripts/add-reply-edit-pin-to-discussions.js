@@ -92,16 +92,17 @@ async function addReplyEditPinToDiscussions() {
     }
     
     console.log('✅ Migration completed successfully!');
-    process.exit(0);
   } catch (error) {
     console.error('❌ Migration failed:', error);
-    process.exit(1);
+    throw error;
   }
 }
 
 // Run migration if called directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-  addReplyEditPinToDiscussions();
+  addReplyEditPinToDiscussions()
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1));
 }
 
 export default addReplyEditPinToDiscussions;

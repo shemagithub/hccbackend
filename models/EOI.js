@@ -1,6 +1,16 @@
 import pool from '../config/db.js';
+import { addAwardedDecisionFields } from '../scripts/add-awarded-decision-fields.js';
 
 class EOI {
+  static awardedFieldsReady = false;
+
+  static async ensureAwardedFields() {
+    if (this.awardedFieldsReady) return;
+    await this.createTable();
+    await addAwardedDecisionFields();
+    this.awardedFieldsReady = true;
+  }
+
   static async createTable() {
     const query = `
       CREATE TABLE IF NOT EXISTS eois (
@@ -123,6 +133,10 @@ class EOI {
       params.push(searchTerm, searchTerm);
     }
 
+    if (filters.excludeImplemented === true || filters.excludeImplemented === 'true') {
+      query += ` AND (implementation_id IS NULL OR implementation_id = 0)`;
+    }
+
     query += ` ORDER BY created_at DESC`;
 
     if (filters.limit) {
@@ -140,6 +154,7 @@ class EOI {
   }
 
   static async findById(id) {
+    await this.ensureAwardedFields();
     const [rows] = await pool.execute(
       'SELECT * FROM eois WHERE id = ?',
       [id]
@@ -150,6 +165,7 @@ class EOI {
   }
 
   static async findByEOIId(eoiId) {
+    await this.ensureAwardedFields();
     const [rows] = await pool.execute(
       'SELECT * FROM eois WHERE eoi_id = ?',
       [eoiId]
@@ -160,6 +176,7 @@ class EOI {
   }
 
   static async update(id, updateData) {
+    await this.ensureAwardedFields();
     const fields = [];
     const values = [];
 
@@ -201,6 +218,22 @@ class EOI {
         : updateData.requirements || null;
       fields.push('requirements = ?');
       values.push(requirementsStr);
+    }
+    if (updateData.decision !== undefined) {
+      fields.push('decision = ?');
+      values.push(updateData.decision);
+    }
+    if (updateData.implementationStartDate !== undefined) {
+      fields.push('implementation_start_date = ?');
+      values.push(updateData.implementationStartDate || null);
+    }
+    if (updateData.implementationDueDate !== undefined) {
+      fields.push('implementation_due_date = ?');
+      values.push(updateData.implementationDueDate || null);
+    }
+    if (updateData.implementationId !== undefined) {
+      fields.push('implementation_id = ?');
+      values.push(updateData.implementationId || null);
     }
 
     if (fields.length === 0) {
@@ -271,6 +304,14 @@ class EOI {
       assignedTo: row.assigned_to,
       description: row.description,
       requirements,
+      decision: row.decision || 'pending',
+      implementationStartDate: row.implementation_start_date
+        ? row.implementation_start_date.toISOString().split('T')[0]
+        : null,
+      implementationDueDate: row.implementation_due_date
+        ? row.implementation_due_date.toISOString().split('T')[0]
+        : null,
+      implementationId: row.implementation_id || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

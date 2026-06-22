@@ -1,13 +1,6 @@
-import pool, { testConnection } from '../config/db.js';
 import Role from '../models/Role.js';
 
 async function initializeRolesTable() {
-  const dbConnected = await testConnection();
-  if (!dbConnected) {
-    console.error('Cannot initialize roles table: Database not connected.');
-    process.exit(1);
-  }
-
   try {
     await Role.createTable();
     console.log('Roles table initialization complete.');
@@ -136,12 +129,7 @@ async function initializeRolesTable() {
 
   } catch (error) {
     console.error('Error during roles table initialization:', error);
-    process.exit(1);
-  } finally {
-    // It's good practice to end the pool connection if this script is meant to run once and exit.
-    // However, if the application keeps running, the pool should remain open.
-    // For a simple init script, closing it is fine.
-    // await pool.end(); // Uncomment if you want to close the pool after script execution
+    throw error;
   }
 }
 
@@ -152,5 +140,5 @@ export async function initializeRoles() {
 
 // Run the initialization if this script is executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-  initializeRolesTable();
+  initializeRolesTable().catch(() => process.exit(1));
 }

@@ -53,10 +53,16 @@ export class ImplementationController {
         createdBy: req.staffId || null
       });
 
+      let result = implementation;
+      if (!implementation.projectId && implementation.dbId) {
+        const linked = await Implementation.ensureLinkedProject(implementation.dbId);
+        result = linked.implementation;
+      }
+
       res.status(201).json({
         success: true,
         message: 'Implementation created successfully',
-        data: implementation
+        data: result
       });
     } catch (error) {
       console.error('Create implementation error:', error);
@@ -270,6 +276,72 @@ export class ImplementationController {
         success: false,
         message: 'Failed to delete implementation',
         error: error.message
+      });
+    }
+  }
+
+  static async getWorkspace(req, res) {
+    try {
+      const { id } = req.params;
+      const implementation = await Implementation.findById(parseInt(id, 10)) ||
+        await Implementation.findByImplementationId(id);
+
+      if (!implementation?.dbId) {
+        return res.status(404).json({ success: false, message: 'Implementation not found' });
+      }
+
+      const workspace = await Implementation.getWorkspace(implementation.dbId);
+      res.json({ success: true, data: workspace });
+    } catch (error) {
+      console.error('Get implementation workspace error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to load implementation workspace',
+        error: error.message,
+      });
+    }
+  }
+
+  static async getWorkspaceByProject(req, res) {
+    try {
+      const { projectId } = req.params;
+      const workspace = await Implementation.getWorkspaceByProject(projectId);
+      res.json({ success: true, data: workspace });
+    } catch (error) {
+      console.error('Get workspace by project error:', error);
+      const status = error.message === 'Project not found' ? 404 : 500;
+      res.status(status).json({
+        success: false,
+        message: error.message === 'Project not found'
+          ? 'Project not found'
+          : 'Failed to load project workspace',
+        error: error.message,
+      });
+    }
+  }
+
+  static async ensureProject(req, res) {
+    try {
+      const { id } = req.params;
+      const implementation = await Implementation.findById(parseInt(id, 10)) ||
+        await Implementation.findByImplementationId(id);
+
+      if (!implementation?.dbId) {
+        return res.status(404).json({ success: false, message: 'Implementation not found' });
+      }
+
+      const linked = await Implementation.ensureLinkedProject(implementation.dbId);
+      res.json({
+        success: true,
+        message: 'Project linked successfully',
+        data: linked,
+      });
+    } catch (error) {
+      console.error('Ensure implementation project error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to link project',
+        error: error.message,
       });
     }
   }

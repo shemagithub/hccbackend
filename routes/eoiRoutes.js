@@ -19,6 +19,9 @@ router.post('/', EOIController.createEOI);
 // Update EOI
 router.put('/:id', EOIController.updateEOI);
 
+// Start implementation from awarded EOI
+router.post('/:id/start-implementation', EOIController.startImplementation);
+
 // Delete EOI
 router.delete('/:id', EOIController.deleteEOI);
 

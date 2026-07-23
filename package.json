@@ -4,6 +4,9 @@
   "description": "HCC Backend API with MySQL Database",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",

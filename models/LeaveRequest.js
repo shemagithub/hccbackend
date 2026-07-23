@@ -101,6 +101,11 @@ class LeaveRequest {
       params.push(filters.staffEmail);
     }
 
+    if (filters.departmentId) {
+      query += ` AND s.department_id = ?`;
+      params.push(filters.departmentId);
+    }
+
     if (filters.leaveType && filters.leaveType !== 'all') {
       query += ` AND lr.leave_type = ?`;
       params.push(filters.leaveType);

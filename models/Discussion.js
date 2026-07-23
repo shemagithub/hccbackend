@@ -1,7 +1,42 @@
 import pool from '../config/db.js';
 
 class Discussion {
+  static sanitizeAuthorProfileImage(value) {
+    if (!value) return null;
+    const str = String(value).trim();
+    if (!str || str.startsWith('data:') || str.length > 500) {
+      return null;
+    }
+    return str;
+  }
+
+  static async ensureSchemaColumns() {
+    try {
+      const [columns] = await pool.execute(
+        `SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = 'discussions'
+           AND COLUMN_NAME = 'author_profile_image'`,
+      );
+
+      if (columns.length > 0) {
+        const column = columns[0];
+        const maxLength = column.CHARACTER_MAXIMUM_LENGTH;
+        if (column.DATA_TYPE === 'varchar' && maxLength !== null && maxLength <= 500) {
+          await pool.execute(
+            'ALTER TABLE discussions MODIFY COLUMN author_profile_image TEXT NULL',
+          );
+          console.log('Discussions: widened author_profile_image column to TEXT.');
+        }
+      }
+    } catch (error) {
+      console.warn('Discussions schema ensure warning:', error.message);
+    }
+  }
+
   static async createTable() {
+    await this.ensureSchemaColumns();
     const query = `
       CREATE TABLE IF NOT EXISTS discussions (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -16,7 +51,7 @@ class Discussion {
         voice_duration INT NULL,
         author_id INT NOT NULL,
         author_name VARCHAR(255) NOT NULL,
-        author_profile_image VARCHAR(500) NULL,
+        author_profile_image TEXT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_opportunity (opportunity_id),
@@ -75,7 +110,8 @@ class Discussion {
     const cleanMessageType = validMessageTypes.includes(messageType) ? messageType : 'text';
 
     const cleanAuthorName = authorName ? String(authorName).trim() : 'Unknown User';
-    const cleanAuthorProfileImage = authorProfileImage ? String(authorProfileImage).trim() : null;
+    // Profile images are resolved via staff JOIN on read; avoid storing large base64 blobs here.
+    const cleanAuthorProfileImage = Discussion.sanitizeAuthorProfileImage(authorProfileImage);
     
     // Clean file data
     const cleanFileData = fileData ? String(fileData) : null;
@@ -103,7 +139,7 @@ class Discussion {
 
   static async findAll(filters = {}) {
     let query = `
-      SELECT d.*, s.profile_image as author_profile_image
+      SELECT d.*, COALESCE(s.profile_image, d.author_profile_image) AS author_profile_image
       FROM discussions d
       LEFT JOIN staff s ON d.author_id = s.id
       WHERE 1=1
@@ -139,7 +175,7 @@ class Discussion {
 
   static async findById(id) {
     const [rows] = await pool.execute(
-      `SELECT d.*, s.profile_image as author_profile_image
+      `SELECT d.*, COALESCE(s.profile_image, d.author_profile_image) AS author_profile_image
        FROM discussions d
        LEFT JOIN staff s ON d.author_id = s.id
        WHERE d.id = ?`,

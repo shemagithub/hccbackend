@@ -1,4 +1,7 @@
 import Role from '../models/Role.js';
+import Staff from '../models/Staff.js';
+import UserPermission from '../models/UserPermission.js';
+import { getPermissionCatalog, buildStaffAccessPayload } from '../utils/rolePermissions.js';
 
 export class RoleController {
   // Create a new role
@@ -8,6 +11,8 @@ export class RoleController {
         name,
         description,
         permissions = [],
+        controlPanel = null,
+        isSystem = false,
         status = 'active',
         notes
       } = req.body;
@@ -34,6 +39,8 @@ export class RoleController {
         name,
         description,
         permissions,
+        controlPanel,
+        isSystem: Boolean(isSystem),
         status,
         notes
       });
@@ -75,9 +82,16 @@ export class RoleController {
       const roles = await Role.findAll(filters);
       const stats = await Role.getStats();
 
+      const rolesWithCounts = await Promise.all(
+        roles.map(async (role) => ({
+          ...role,
+          userCount: await Role.countStaffByRoleName(role.name),
+        }))
+      );
+
       res.json({
         success: true,
-        data: roles,
+        data: rolesWithCounts,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
@@ -130,9 +144,11 @@ export class RoleController {
         });
       }
 
+      const userCount = await Role.countStaffByRoleName(role.name);
+
       res.json({
         success: true,
-        data: role
+        data: { ...role, userCount }
       });
     } catch (error) {
       console.error('Get role by ID error:', error);
@@ -177,6 +193,13 @@ export class RoleController {
         }
       }
 
+
+      if (role.isSystem && updateData.isSystem === false) {
+        return res.status(403).json({
+          success: false,
+          message: 'System roles cannot be converted to custom roles'
+        });
+      }
 
       const success = await Role.update(parseInt(id), updateData);
 
@@ -224,6 +247,21 @@ export class RoleController {
         });
       }
 
+      if (role.isSystem) {
+        return res.status(403).json({
+          success: false,
+          message: 'System roles cannot be deleted. You can deactivate the role instead.'
+        });
+      }
+
+      const assignedCount = await Role.countStaffByRoleName(role.name);
+      if (assignedCount > 0) {
+        return res.status(409).json({
+          success: false,
+          message: `Cannot delete role assigned to ${assignedCount} staff member(s). Reassign users first or deactivate the role.`
+        });
+      }
+
       const success = await Role.delete(parseInt(id));
 
       if (success) {
@@ -262,6 +300,50 @@ export class RoleController {
         success: false,
         message: 'Failed to fetch role statistics',
         error: error.message
+      });
+    }
+  }
+
+  // Permission catalog for superadmin UI
+  static async getPermissionCatalog(req, res) {
+    try {
+      res.json({
+        success: true,
+        data: getPermissionCatalog(),
+      });
+    } catch (error) {
+      console.error('Get permission catalog error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch permission catalog',
+        error: error.message,
+      });
+    }
+  }
+
+  // Resolve access for current authenticated staff member
+  static async getMyAccess(req, res) {
+    try {
+      if (!req.staffId) {
+        return res.status(401).json({ success: false, message: 'Authentication required' });
+      }
+
+      const staff = await Staff.findById(req.staffId);
+      if (!staff) {
+        return res.status(404).json({ success: false, message: 'Staff not found' });
+      }
+
+      const roleRecord = await Role.findByName(staff.role);
+      const userPermissions = await UserPermission.getPermissionsByStaffId(parseInt(req.staffId, 10));
+      const access = buildStaffAccessPayload(staff, roleRecord, userPermissions);
+
+      res.json({ success: true, data: access });
+    } catch (error) {
+      console.error('Get my access error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to resolve access permissions',
+        error: error.message,
       });
     }
   }

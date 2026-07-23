@@ -1,4 +1,7 @@
 import Staff from '../models/Staff.js';
+import Role from '../models/Role.js';
+import UserPermission from '../models/UserPermission.js';
+import { buildStaffAccessPayload } from '../utils/rolePermissions.js';
 
 export class StaffController {
   // Create a new staff member
@@ -431,6 +434,10 @@ export class StaffController {
         });
       }
 
+      if (!Staff.isBcryptHash(staff.passwordHash)) {
+        await Staff.resetPassword(staff.id, password);
+      }
+
       console.log(`[AUTH] Password verified successfully for user: ${email}`);
 
       if (staff.status !== 'active') {
@@ -447,12 +454,19 @@ export class StaffController {
       // Remove password hash from response
       const { passwordHash, ...staffWithoutPassword } = staff;
 
+      const roleRecord = await Role.findByName(staff.role);
+      const userPermissions = await UserPermission.getPermissionsByStaffId(staff.id);
+      const access = buildStaffAccessPayload(staffWithoutPassword, roleRecord, userPermissions);
+
       console.log(`[AUTH] Authentication successful for user: ${email}, role: ${staff.role}`);
 
       res.json({
         success: true,
         message: 'Authentication successful',
-        data: staffWithoutPassword
+        data: {
+          ...staffWithoutPassword,
+          ...access,
+        }
       });
     } catch (error) {
       console.error('[AUTH] Authentication error:', error);

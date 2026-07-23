@@ -1,25 +1,12 @@
 import FieldReport from '../models/FieldReport.js';
-import Staff from '../models/Staff.js';
+import { buildWorkFieldReportFilters } from '../utils/projectReportAccess.js';
 
 export const getFieldReports = async (req, res) => {
   try {
-    const filters = {};
-    
-    if (req.staffId) {
-      const staff = await Staff.findById(req.staffId);
-      if (staff && staff.role !== 'superadmin' && staff.role !== 'finance' && staff.role !== 'admin') {
-        filters.staffEmail = staff.email;
-      }
+    const { filters, error, message } = await buildWorkFieldReportFilters(req);
+    if (error === 'FORBIDDEN') {
+      return res.status(403).json({ success: false, message });
     }
-
-    if (req.query.staffId) filters.staffId = parseInt(req.query.staffId);
-    if (req.query.projectId) filters.projectId = parseInt(req.query.projectId);
-    if (req.query.status) filters.status = req.query.status;
-    if (req.query.startDate) filters.startDate = req.query.startDate;
-    if (req.query.endDate) filters.endDate = req.query.endDate;
-    if (req.query.search) filters.search = req.query.search;
-    if (req.query.limit) filters.limit = parseInt(req.query.limit);
-    if (req.query.offset) filters.offset = parseInt(req.query.offset);
 
     const reports = await FieldReport.findAll(filters);
     res.json({ success: true, data: reports });

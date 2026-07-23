@@ -18,7 +18,11 @@ async function addColumnIfMissing(tableName, columnName, definition) {
   }
 }
 
+let awardedDecisionFieldsReady = false;
+
 export async function addAwardedDecisionFields() {
+  if (awardedDecisionFieldsReady) return;
+
   console.log('🔄 Adding awarded decision fields to EOIs and opportunity proposals...');
 
   await addColumnIfMissing(
@@ -52,4 +56,5 @@ export async function addAwardedDecisionFields() {
   );
 
   console.log('✅ Awarded decision fields migration complete');
+  awardedDecisionFieldsReady = true;
 }

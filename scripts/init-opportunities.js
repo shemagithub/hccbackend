@@ -1,4 +1,5 @@
 import Opportunity from '../models/Opportunity.js';
+import { migrateOpportunityStatusFields } from './migrate-opportunity-status-fields.js';
 
 export async function initializeOpportunities() {
   try {
@@ -6,6 +7,7 @@ export async function initializeOpportunities() {
     
     // Create the opportunities table
     await Opportunity.createTable();
+    await migrateOpportunityStatusFields();
     
     console.log('✅ Opportunities table initialized successfully');
   } catch (error) {

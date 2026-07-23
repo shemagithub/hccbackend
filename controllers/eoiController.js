@@ -1,7 +1,13 @@
 import EOI from '../models/EOI.js';
 import Implementation from '../models/Implementation.js';
+import {
+  normalizeBase64Document,
+  validateBase64DocumentSize,
+} from '../constants/opportunityOptions.js';
+import { ensureProposalForOpportunityDbId, syncGoEOIsToProposals } from '../utils/opportunityPipeline.js';
 
 const VALID_DECISIONS = ['pending', 'under_review', 'awarded', 'rejected', 'cancelled'];
+const VALID_GO_DECISIONS = ['pending', 'go', 'not_go'];
 
 function validateAwardedDecision(updateData) {
   if (updateData.decision !== 'awarded') return null;
@@ -94,6 +100,8 @@ export class EOIController {
         offset: (parseInt(page) - 1) * parseInt(limit)
       };
 
+      await syncGoEOIsToProposals();
+
       const eois = await EOI.findAll(filters);
       const stats = await EOI.getStats();
 
@@ -171,6 +179,13 @@ export class EOIController {
         });
       }
 
+      if (updateData.goDecision !== undefined && !VALID_GO_DECISIONS.includes(updateData.goDecision)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid go decision value. Must be: pending, go, or not_go',
+        });
+      }
+
       if (updateData.decision !== undefined && !VALID_DECISIONS.includes(updateData.decision)) {
         return res.status(400).json({
           success: false,
@@ -190,12 +205,50 @@ export class EOIController {
         return res.status(400).json({ success: false, message: awardedError });
       }
 
+      if (updateData.attachedDocument !== undefined) {
+        const normalizedDocument = normalizeBase64Document(updateData.attachedDocument);
+        const sizeError = validateBase64DocumentSize(normalizedDocument, 'Attached document');
+        if (sizeError) {
+          return res.status(400).json({ success: false, message: sizeError });
+        }
+        updateData.attachedDocument = normalizedDocument;
+      }
+
       const updatedEOI = await EOI.update(eoi.dbId, updateData);
+
+      let proposalResult = null;
+      if (updateData.goDecision === 'go') {
+        if (!updatedEOI.opportunityId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Cannot move to proposal: this EOI is not linked to an opportunity',
+          });
+        }
+
+        try {
+          proposalResult = await ensureProposalForOpportunityDbId(updatedEOI.opportunityId);
+        } catch (pipelineError) {
+          console.error('EOI go-to-proposal error:', pipelineError);
+          return res.status(500).json({
+            success: false,
+            message: pipelineError.message || 'Failed to create proposal from EOI',
+          });
+        }
+      }
 
       res.json({
         success: true,
-        message: 'EOI updated successfully',
-        data: updatedEOI
+        message:
+          updateData.goDecision === 'go'
+            ? proposalResult?.created
+              ? 'EOI marked as Go and proposal created'
+              : 'EOI marked as Go — opening proposal'
+            : 'EOI updated successfully',
+        data: {
+          ...updatedEOI,
+          proposalOpportunityId: proposalResult?.proposalOpportunityId || null,
+          proposalCreated: proposalResult?.created ?? false,
+        },
       });
     } catch (error) {
       console.error('Update EOI error:', error);

@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import { wrapExecute } from '../utils/sqlLimitOffset.js';
 
 dotenv.config();
 
@@ -15,11 +16,22 @@ const dbConfig = {
   database: process.env.DB_NAME || process.env.DB_DATABASE || 'hcc',
   connectTimeout: 10000,
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+  // Shared hosting: keep pool modest and recycle idle connections before MySQL wait_timeout
+  connectionLimit: Number(process.env.DB_CONNECTION_LIMIT) || 15,
+  maxIdle: Number(process.env.DB_MAX_IDLE) || 5,
+  idleTimeout: Number(process.env.DB_IDLE_TIMEOUT_MS) || 30000,
+  queueLimit: Number(process.env.DB_QUEUE_LIMIT) || 50,
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
 };
+
+const RETRYABLE_DB_ERRORS = new Set([
+  'PROTOCOL_CONNECTION_LOST',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR',
+]);
 
 /** Server connection config (no database — used to create DB if missing). */
 const serverConfig = {
@@ -31,7 +43,44 @@ const serverConfig = {
 };
 
 // Create connection pool
-const pool = mysql.createPool(dbConfig);
+const rawPool = mysql.createPool(dbConfig);
+
+const withConnectionRetry = async (operation, retries = 2) => {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      const code = error?.code;
+      if (!RETRYABLE_DB_ERRORS.has(code) || attempt === retries) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+};
+
+const executeWithLimitFix = wrapExecute((...args) => rawPool.execute(...args));
+
+/**
+ * Pool wrapper:
+ * - retries once on stale/lost MySQL connections (common on shared hosting)
+ * - rewrites LIMIT/OFFSET ? placeholders for MariaDB compatibility
+ */
+const pool = {
+  execute: (...args) => withConnectionRetry(() => executeWithLimitFix(...args)),
+  query: (...args) => withConnectionRetry(() => rawPool.query(...args)),
+  getConnection: async (...args) => {
+    const connection = await rawPool.getConnection(...args);
+    const originalExecute = connection.execute.bind(connection);
+    connection.execute = wrapExecute(originalExecute);
+    return connection;
+  },
+  on: (...args) => rawPool.on(...args),
+  end: (...args) => rawPool.end(...args),
+};
 
 let packetWarningLogged = false;
 
@@ -60,7 +109,7 @@ const ensureDatabase = async () => {
 };
 
 // Handle pool errors
-pool.on('error', (err) => {
+rawPool.on('error', (err) => {
   console.error('❌ MySQL Pool Error:', err.code, '-', err.message);
   if (err.code === 'PROTOCOL_CONNECTION_LOST') {
     console.error('   Connection lost. Pool will attempt to reconnect.');
@@ -70,7 +119,7 @@ pool.on('error', (err) => {
 });
 
 // Set SESSION packet size once per new pool connection (quiet if GLOBAL is already 256MB)
-pool.on('connection', (connection) => {
+rawPool.on('connection', (connection) => {
   connection.promise()
     .execute(`SET SESSION max_allowed_packet = ${SESSION_PACKET_BYTES}`)
     .catch(() => {});
@@ -161,5 +210,20 @@ const testConnection = async (retries = 3, delay = 2000) => {
   return false;
 };
 
-export { pool, testConnection, ensureDatabase, dbConfig };
+/** Lightweight DB ping for health checks (no verbose logging). */
+const pingDatabase = async (timeoutMs = 8000) => {
+  try {
+    await Promise.race([
+      rawPool.execute('SELECT 1'),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Database ping timed out')), timeoutMs);
+      }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export { pool, rawPool, testConnection, pingDatabase, ensureDatabase, dbConfig };
 export default pool;

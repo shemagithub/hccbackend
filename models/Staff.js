@@ -79,14 +79,14 @@ class Staff {
 
     query += ' ORDER BY s.created_at DESC';
 
-    if (filters.limit) {
-      query += ' LIMIT ?';
-      params.push(filters.limit);
+    // MariaDB rejects prepared LIMIT/OFFSET placeholders — interpolate safe integers.
+    const limit = Number.parseInt(filters.limit, 10);
+    const offset = Number.parseInt(filters.offset, 10);
+    if (Number.isFinite(limit) && limit > 0) {
+      query += ` LIMIT ${limit}`;
     }
-
-    if (filters.offset) {
-      query += ' OFFSET ?';
-      params.push(filters.offset);
+    if (Number.isFinite(offset) && offset > 0) {
+      query += ` OFFSET ${offset}`;
     }
 
     const [rows] = await pool.execute(query, params);
@@ -310,8 +310,20 @@ class Staff {
     return rows.length > 0;
   }
 
+  static isBcryptHash(value) {
+    return (
+      typeof value === 'string' &&
+      (value.startsWith('$2a$') || value.startsWith('$2b$') || value.startsWith('$2y$'))
+    );
+  }
+
   static async verifyPassword(password, hashedPassword) {
-    return await bcrypt.compare(password, hashedPassword);
+    if (!hashedPassword) return false;
+    if (Staff.isBcryptHash(hashedPassword)) {
+      return await bcrypt.compare(password, hashedPassword);
+    }
+    // Legacy plaintext passwords from imported SQL dumps
+    return password === hashedPassword;
   }
 
   static async updateLastLogin(id) {

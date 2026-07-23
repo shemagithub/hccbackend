@@ -12,6 +12,7 @@ router.get('/financial', authenticate, reportController.exportFinancialReport);
 router.get('/export', authenticate, reportController.exportDataReport);
 
 // Project Management Report routes
+router.get('/project/implementation', authenticate, ProjectReportController.getImplementationReport);
 router.get('/project/performance', authenticate, ProjectReportController.getPerformanceReport);
 router.get('/project/department', authenticate, ProjectReportController.getDepartmentSummary);
 router.get('/project/metrics', authenticate, ProjectReportController.getMetricsReport);

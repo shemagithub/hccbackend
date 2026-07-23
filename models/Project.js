@@ -1,6 +1,35 @@
 import pool from '../config/db.js';
 
 class Project {
+  static linkFieldsReady = false;
+
+  static async ensureLinkFields() {
+    if (this.linkFieldsReady) return;
+
+    const columns = [
+      { name: 'opportunity_id', ddl: 'ADD COLUMN opportunity_id INT NULL AFTER assigned_to' },
+      { name: 'contract_id', ddl: 'ADD COLUMN contract_id INT NULL AFTER opportunity_id' },
+    ];
+
+    for (const column of columns) {
+      const [rows] = await pool.execute(
+        `SELECT COLUMN_NAME
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = 'projects'
+           AND COLUMN_NAME = ?`,
+        [column.name]
+      );
+
+      if (rows.length === 0) {
+        await pool.execute(`ALTER TABLE projects ${column.ddl}`);
+        console.log(`Added projects.${column.name}`);
+      }
+    }
+
+    this.linkFieldsReady = true;
+  }
+
   static async createTable() {
     const query = `
       CREATE TABLE IF NOT EXISTS projects (
@@ -20,7 +49,7 @@ class Project {
         priority ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
         description TEXT NULL,
         location VARCHAR(255) NULL,
-        assigned_to VARCHAR(255) NULL,
+        assigned_to TEXT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_status (status),
@@ -31,6 +60,7 @@ class Project {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     await pool.execute(query);
+    await this.ensureLinkFields();
     console.log('Projects table created or already exists.');
   }
 
@@ -90,14 +120,20 @@ class Project {
         assigned_to LIKE ? OR
         assigned_to LIKE ? OR
         assigned_to LIKE ? OR
-        assigned_to = ?
+        assigned_to = ? OR
+        id IN (
+          SELECT pa.project_id
+          FROM project_assignments pa
+          INNER JOIN staff s ON pa.staff_id = s.id
+          WHERE s.email = ? AND pa.status IN ('active', 'pending')
+        )
       )`;
       // Match email at start, middle, or end of comma-separated list
       const emailPattern1 = `${filters.userEmail},%`; // Email at start
       const emailPattern2 = `%,${filters.userEmail},%`; // Email in middle
       const emailPattern3 = `%,${filters.userEmail}`; // Email at end
       const exactMatch = filters.userEmail; // Exact match (single email)
-      params.push(emailPattern1, emailPattern2, emailPattern3, exactMatch);
+      params.push(emailPattern1, emailPattern2, emailPattern3, exactMatch, filters.userEmail);
     }
 
     if (filters.search) {
@@ -142,6 +178,14 @@ class Project {
     if (filters.manager) {
       query += ` AND manager = ?`;
       params.push(filters.manager);
+    }
+
+    if (filters.id) {
+      query += ` AND id = ?`;
+      params.push(parseInt(filters.id, 10));
+    } else if (filters.projectId) {
+      query += ` AND id = ?`;
+      params.push(parseInt(filters.projectId, 10));
     }
 
     query += ` ORDER BY created_at DESC`;
@@ -194,7 +238,9 @@ class Project {
       priority: 'priority',
       description: 'description',
       location: 'location',
-      assignedTo: 'assigned_to'
+      assignedTo: 'assigned_to',
+      opportunityId: 'opportunity_id',
+      contractId: 'contract_id',
     };
 
     Object.keys(updateData).forEach(key => {
@@ -216,6 +262,7 @@ class Project {
   }
 
   static async delete(id) {
+    await pool.execute('DELETE FROM implementations WHERE project_id = ?', [id]);
     const [result] = await pool.execute('DELETE FROM projects WHERE id = ?', [id]);
     return result.affectedRows > 0;
   }
@@ -254,6 +301,14 @@ class Project {
       params.push(filters.manager);
     }
 
+    if (filters.id) {
+      query += ` AND id = ?`;
+      params.push(parseInt(filters.id, 10));
+    } else if (filters.projectId) {
+      query += ` AND id = ?`;
+      params.push(parseInt(filters.projectId, 10));
+    }
+
     const [rows] = await pool.execute(query, params);
     return rows[0];
   }
@@ -277,6 +332,8 @@ class Project {
       description: row.description,
       location: row.location,
       assignedTo: row.assigned_to,
+      opportunityId: row.opportunity_id || null,
+      contractId: row.contract_id || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

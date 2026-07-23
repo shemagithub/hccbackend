@@ -9,6 +9,7 @@
     "dev": "nodemon index.js",
     "init-db": "node scripts/init-db.js",
     "init-all-tables": "node scripts/init-all-tables.js",
+    "import-schema": "node scripts/import-sql-schema.js",
     "create-logistic-user": "node scripts/create-logistic-user.js",
     "create-department-director-user": "node scripts/create-department-director-user.js",
     "create-project-manager-user": "node scripts/create-project-manager-user.js",
@@ -16,12 +17,14 @@
     "create-financeproject-user": "node scripts/create-financeproject-user.js",
     "update-opportunities-documents": "node scripts/update-opportunities-documents.js",
     "update-opportunities-table": "node scripts/update-opportunities-table.js",
+    "migrate-opportunity-status-fields": "node scripts/migrate-opportunity-status-fields.js",
+    "migrate-eoi-opportunity-link": "node scripts/migrate-eoi-opportunity-link.js",
     "set-max-allowed-packet": "node scripts/set-max-allowed-packet.js",
     "add-department-to-projects": "node scripts/add-department-to-projects.js",
     "add-multiple-assignees-to-tasks": "node scripts/add-multiple-assignees-to-tasks.js",
     "add-message-types-to-discussions": "node scripts/add-message-types-to-discussions.js",
     "add-reply-edit-pin-to-discussions": "node scripts/add-reply-edit-pin-to-discussions.js",
-    "create-receptionist-user": "node scripts/create-receptionist-user.js",
+    "create-receptionist-user": "node scripts/create-receptionist-user.js"
   },
   "keywords": [
     "hcc",

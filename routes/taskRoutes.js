@@ -13,6 +13,7 @@ router.get('/', TaskController.getTasks);
 router.get('/stats', TaskController.getTaskStats);
 router.get('/:id', TaskController.getTaskById);
 router.put('/:id', TaskController.updateTask);
+router.post('/:id/review', TaskController.reviewTask);
 router.delete('/:id', TaskController.deleteTask);
 
 export default router;

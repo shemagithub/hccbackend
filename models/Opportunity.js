@@ -1,4 +1,8 @@
 import pool from '../config/db.js';
+import {
+  DEFAULT_OPPORTUNITY_DECISION,
+  DEFAULT_OPPORTUNITY_URGENCY,
+} from '../constants/opportunityOptions.js';
 
 class Opportunity {
   static async createTable() {
@@ -19,15 +23,15 @@ class Opportunity {
         win_probability_document LONGTEXT NULL,
         bid_currency VARCHAR(10) NOT NULL,
         fund_agency VARCHAR(255) NULL,
-        urgency ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
+        urgency ENUM('not_urgent', 'urgent', 'very_urgent', 'past_due') DEFAULT 'not_urgent',
         supporting_document LONGTEXT NULL,
         comment TEXT NULL,
         year VARCHAR(4) NOT NULL,
         status ENUM('open', 'qualified', 'proposal', 'won', 'lost') DEFAULT 'open',
-        decision ENUM('pending', 'approved', 'rejected', 'under_review', 'cancelled') DEFAULT 'pending',
+        decision ENUM('submitted', 'under_preparation', 'internal_review', 'overdue', 'failed') DEFAULT 'submitted',
         value DECIMAL(15,2) NOT NULL DEFAULT 0,
         expected_close_date DATE NULL,
-        assigned_to VARCHAR(255) NULL,
+        assigned_to TEXT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_status (status),
@@ -108,12 +112,12 @@ class Opportunity {
     winProbabilityDocument,
     bidCurrency,
     fundAgency,
-    urgency = 'medium',
+    urgency = DEFAULT_OPPORTUNITY_URGENCY,
     supportingDocument,
     comment,
     year,
     status = 'open',
-    decision = 'pending',
+    decision = DEFAULT_OPPORTUNITY_DECISION,
     value = 0,
     expectedCloseDate,
     assignedTo
@@ -171,12 +175,12 @@ class Opportunity {
           (winProbabilityDocument && String(winProbabilityDocument).trim()) || null, 
           bid, 
           (fundAgency && String(fundAgency).trim()) || null, 
-          (urgency && String(urgency).trim()) || 'medium',
+          (urgency && String(urgency).trim()) || DEFAULT_OPPORTUNITY_URGENCY,
           (supportingDocument && String(supportingDocument).trim()) || null, 
           (comment && String(comment).trim()) || null, 
           yr, 
           (status && String(status).trim()) || 'open', 
-          (decision && String(decision).trim()) || 'pending', 
+          (decision && String(decision).trim()) || DEFAULT_OPPORTUNITY_DECISION, 
           parseFloat(String(value)) || 0,
           (expectedCloseDate && String(expectedCloseDate).trim()) || null, 
           (assignedTo && String(assignedTo).trim()) || null
@@ -207,82 +211,156 @@ class Opportunity {
   }
 
   /** List query — excludes LONGTEXT documents to keep responses fast */
-  static LIST_SELECT = `
+  static LIST_SELECT_BASIC = `
     id, opportunity_id, department, country, name, legal_entity, client, contact,
-    description, feedback_deadline, operation_date, win_probability, bid_currency,
+    LEFT(description, 1000) AS description, feedback_deadline, operation_date, win_probability, bid_currency,
     fund_agency, urgency, comment, year, status, decision, value, expected_close_date,
     assigned_to, created_at, updated_at,
-    (supporting_document IS NOT NULL AND CHAR_LENGTH(supporting_document) > 0) AS has_supporting_document,
-    (win_probability_document IS NOT NULL AND CHAR_LENGTH(win_probability_document) > 0) AS has_win_probability_document
+    (supporting_document IS NOT NULL) AS has_supporting_document,
+    (win_probability_document IS NOT NULL) AS has_win_probability_document
   `;
 
+  static LIST_SELECT = `
+    o.id, o.opportunity_id, o.department, o.country, o.name, o.legal_entity, o.client, o.contact,
+    LEFT(o.description, 1000) AS description, o.feedback_deadline, o.operation_date, o.win_probability, o.bid_currency,
+    o.fund_agency, o.urgency, o.comment, o.year, o.status, o.decision, o.value, o.expected_close_date,
+    o.assigned_to, o.created_at, o.updated_at,
+    (o.supporting_document IS NOT NULL) AS has_supporting_document,
+    (o.win_probability_document IS NOT NULL) AS has_win_probability_document,
+    (SELECT e.eoi_id FROM eois e WHERE e.opportunity_id = o.id LIMIT 1) AS linked_eoi_id,
+    (SELECT e.id FROM eois e WHERE e.opportunity_id = o.id LIMIT 1) AS linked_eoi_db_id,
+    (SELECT e.go_decision FROM eois e WHERE e.opportunity_id = o.id LIMIT 1) AS linked_eoi_go_decision,
+    EXISTS(SELECT 1 FROM opportunity_proposals op WHERE op.opportunity_id = o.id) AS has_proposal
+  `;
+
+  static isPipelineSchemaError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return (
+      message.includes('opportunity_proposals') ||
+      message.includes('opportunity_id') ||
+      message.includes("doesn't exist") ||
+      message.includes('unknown column') ||
+      message.includes('er_no_such_table')
+    );
+  }
+
+  static async preparePipelineSchema() {
+    try {
+      const { default: EOI } = await import('./EOI.js');
+      const { default: OpportunityProposal } = await import('./OpportunityProposal.js');
+      await EOI.ensureOpportunityLink();
+      await OpportunityProposal.ensureTable();
+      return true;
+    } catch (error) {
+      console.warn('Could not prepare opportunity pipeline schema:', error.message);
+      return false;
+    }
+  }
+
   static async findAll(filters = {}) {
-    let query = `SELECT ${this.LIST_SELECT} FROM opportunities WHERE 1=1`;
+    await this.preparePipelineSchema();
+
+    try {
+      return await this.findAllWithPipeline(filters);
+    } catch (error) {
+      if (this.isPipelineSchemaError(error)) {
+        console.warn(
+          'Pipeline opportunity query failed, using basic list query:',
+          error.message
+        );
+        return await this.findAllBasic(filters);
+      }
+      throw error;
+    }
+  }
+
+  static async findAllWithPipeline(filters = {}) {
+    let query = `
+      SELECT ${this.LIST_SELECT}
+      FROM opportunities o
+      WHERE 1=1
+    `;
+    return this.executeListQuery(query, filters, true);
+  }
+
+  static async findAllBasic(filters = {}) {
+    let query = `SELECT ${this.LIST_SELECT_BASIC} FROM opportunities WHERE 1=1`;
+    return this.executeListQuery(query, filters, false);
+  }
+
+  static async executeListQuery(query, filters = {}, useAlias = true) {
+    const prefix = useAlias ? 'o.' : '';
     const params = [];
 
     if (filters.pipelineStage === 'active') {
-      query += ` AND status IN ('open', 'qualified')`;
+      query += ` AND ${prefix}status IN ('open', 'qualified')`;
     } else if (filters.pipelineStage === 'proposals') {
-      query += ` AND status = 'proposal' AND id NOT IN (
-        SELECT opportunity_id FROM opportunity_proposals WHERE implementation_id IS NOT NULL
+      query += ` AND (
+        EXISTS (
+          SELECT 1 FROM opportunity_proposals op
+          WHERE op.opportunity_id = ${prefix}id
+          AND (op.implementation_id IS NULL OR op.implementation_id = 0)
+        )
+        OR EXISTS (
+          SELECT 1 FROM eois e
+          WHERE e.opportunity_id = ${prefix}id
+          AND e.go_decision = 'go'
+        )
       )`;
     }
 
-    // Filter by assigned user email (if provided)
-    // assigned_to is a comma-separated string of emails
     if (filters.userEmail) {
       query += ` AND (
-        assigned_to LIKE ? OR
-        assigned_to LIKE ? OR
-        assigned_to LIKE ? OR
-        assigned_to = ?
+        ${prefix}assigned_to LIKE ? OR
+        ${prefix}assigned_to LIKE ? OR
+        ${prefix}assigned_to LIKE ? OR
+        ${prefix}assigned_to = ?
       )`;
-      // Match email at start, middle, or end of comma-separated list
-      const emailPattern1 = `${filters.userEmail},%`; // Email at start
-      const emailPattern2 = `%,${filters.userEmail},%`; // Email in middle
-      const emailPattern3 = `%,${filters.userEmail}`; // Email at end
-      const exactMatch = filters.userEmail; // Exact match (single email)
+      const emailPattern1 = `${filters.userEmail},%`;
+      const emailPattern2 = `%,${filters.userEmail},%`;
+      const emailPattern3 = `%,${filters.userEmail}`;
+      const exactMatch = filters.userEmail;
       params.push(emailPattern1, emailPattern2, emailPattern3, exactMatch);
     }
 
     if (filters.search) {
       query += ` AND (
-        name LIKE ? OR
-        client LIKE ? OR
-        department LIKE ? OR
-        country LIKE ? OR
-        opportunity_id LIKE ?
+        ${prefix}name LIKE ? OR
+        ${prefix}client LIKE ? OR
+        ${prefix}department LIKE ? OR
+        ${prefix}country LIKE ? OR
+        ${prefix}opportunity_id LIKE ?
       )`;
       const searchTerm = `%${filters.search}%`;
       params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     if (filters.status && filters.status !== 'all') {
-      query += ` AND status = ?`;
+      query += ` AND ${prefix}status = ?`;
       params.push(filters.status);
     }
 
     if (filters.department) {
-      query += ` AND department = ?`;
+      query += ` AND ${prefix}department = ?`;
       params.push(filters.department);
     }
 
     if (filters.year) {
-      query += ` AND year = ?`;
+      query += ` AND ${prefix}year = ?`;
       params.push(filters.year);
     }
 
     if (filters.urgency) {
-      query += ` AND urgency = ?`;
+      query += ` AND ${prefix}urgency = ?`;
       params.push(filters.urgency);
     }
 
     if (filters.decision && filters.decision !== 'all') {
-      query += ` AND decision = ?`;
+      query += ` AND ${prefix}decision = ?`;
       params.push(filters.decision);
     }
 
-    query += ` ORDER BY created_at DESC`;
+    query += ` ORDER BY ${prefix}created_at DESC`;
 
     if (filters.limit) {
       query += ` LIMIT ?`;
@@ -637,6 +715,10 @@ class Opportunity {
       value: parseFloat(row.value),
       expectedCloseDate: row.expected_close_date ? row.expected_close_date.toISOString().split('T')[0] : null,
       assignedTo: row.assigned_to,
+      linkedEoiId: row.linked_eoi_id || null,
+      linkedEoiDbId: row.linked_eoi_db_id || null,
+      linkedEoiGoDecision: row.linked_eoi_go_decision || null,
+      hasProposal: Boolean(Number(row.has_proposal || 0)),
       createdDate: row.created_at ? row.created_at.toISOString().split('T')[0] : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at

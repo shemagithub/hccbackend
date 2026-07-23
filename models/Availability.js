@@ -160,6 +160,55 @@ class Availability {
     return result.affectedRows > 0;
   }
 
+  /**
+   * Mark each calendar day in [startDate, endDate] as leave for the staff member.
+   * Updates existing rows; creates missing ones.
+   */
+  static async upsertLeaveRange({ staffId, startDate, endDate, notes }) {
+    if (!staffId || !startDate || !endDate) return { created: 0, updated: 0 };
+
+    const start = new Date(`${String(startDate).slice(0, 10)}T00:00:00Z`);
+    const end = new Date(`${String(endDate).slice(0, 10)}T00:00:00Z`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) {
+      return { created: 0, updated: 0 };
+    }
+
+    let created = 0;
+    let updated = 0;
+    const cursor = new Date(start);
+
+    while (cursor <= end) {
+      const dateStr = cursor.toISOString().slice(0, 10);
+      const [existing] = await pool.execute(
+        'SELECT id FROM availability WHERE staff_id = ? AND date = ? LIMIT 1',
+        [staffId, dateStr]
+      );
+
+      if (existing.length > 0) {
+        await pool.execute(
+          `UPDATE availability
+           SET capacity_percentage = 0, work_type = 'leave', notes = ?, updated_at = NOW()
+           WHERE id = ?`,
+          [notes || 'Approved leave', existing[0].id]
+        );
+        updated += 1;
+      } else {
+        await this.create({
+          staffId,
+          date: dateStr,
+          capacityPercentage: 0,
+          workType: 'leave',
+          notes: notes || 'Approved leave',
+        });
+        created += 1;
+      }
+
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+
+    return { created, updated };
+  }
+
   static mapRowToAvailability(row) {
     return {
       id: row.availability_id,

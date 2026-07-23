@@ -4,6 +4,7 @@ export class DiscussionController {
   // Create a new discussion
   static async createDiscussion(req, res) {
     try {
+      await Discussion.ensureSchemaColumns();
       console.log('📥 Received discussion creation request');
       console.log('📦 Request body keys:', Object.keys(req.body || {}));
       console.log('📦 Request body:', {

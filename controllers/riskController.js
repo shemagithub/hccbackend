@@ -2,7 +2,21 @@ import Risk from '../models/Risk.js';
 import Issue from '../models/Issue.js';
 import MitigationAction from '../models/MitigationAction.js';
 import Escalation from '../models/Escalation.js';
+import RiskIssueComment from '../models/RiskIssueComment.js';
 import Staff from '../models/Staff.js';
+import Project from '../models/Project.js';
+import {
+  userHasProjectAccess,
+  resolveStaffProjectPermissions,
+  canCommentOnProjectRisks,
+  canCreateProjectRisks,
+  canEvaluateProjectRisks,
+  resolveEffectiveProjectRole,
+  isElevatedProjectTeamCreator,
+  isProjectManagerPortalStaff,
+  isViewerPortalStaff,
+  getProjectAssignments,
+} from '../utils/projectTeam.js';
 
 export class RiskController {
   // ========== Risk Register ==========
@@ -37,6 +51,33 @@ export class RiskController {
           success: false,
           message: 'Title is required.'
         });
+      }
+
+      const resolvedProjectId = projectId ? parseInt(projectId, 10) : null;
+      if (resolvedProjectId && req.staffId) {
+        const staff = await Staff.findById(req.staffId);
+        const project = await Project.findById(resolvedProjectId);
+        if (!project) {
+          return res.status(404).json({ success: false, message: 'Project not found.' });
+        }
+        const assignments = await getProjectAssignments(resolvedProjectId);
+        const isElevated = isElevatedProjectTeamCreator(staff);
+        const isPmPortal = isProjectManagerPortalStaff(staff);
+        const isViewerPortal = isViewerPortalStaff(staff);
+        const hasAccess = isElevated || (await userHasProjectAccess({ project, staff, assignments }));
+        if (!hasAccess) {
+          return res.status(403).json({
+            success: false,
+            message: 'You do not have access to add risks on this project.',
+          });
+        }
+        const projectRole = await resolveEffectiveProjectRole(req.staffId, resolvedProjectId, project);
+        if (!canCreateProjectRisks(projectRole, { isElevated, isPmPortal, isViewerPortal })) {
+          return res.status(403).json({
+            success: false,
+            message: 'Your project role cannot add risks or issues.',
+          });
+        }
       }
 
       let identifiedByNameFinal = identifiedByName;
@@ -196,6 +237,22 @@ export class RiskController {
       }
 
       const dbId = risk.dbId || parseInt(id);
+
+      if (req.staffId && risk.projectId) {
+        const staff = await Staff.findById(req.staffId);
+        const project = await Project.findById(risk.projectId);
+        const projectRole = await resolveEffectiveProjectRole(req.staffId, risk.projectId, project);
+        const isElevated = isElevatedProjectTeamCreator(staff);
+        const isPmPortal = isProjectManagerPortalStaff(staff);
+        const isSuperAdmin = (staff?.role || '').toLowerCase().replace(/\s+/g, '') === 'superadmin';
+        if (!canEvaluateProjectRisks(projectRole, { isPmPortal, isElevated, isSuperAdmin })) {
+          return res.status(403).json({
+            success: false,
+            message: 'Only project managers or administrators can evaluate and update risks.',
+          });
+        }
+      }
+
       const success = await Risk.update(dbId, updateData);
 
       if (success) {
@@ -217,6 +274,41 @@ export class RiskController {
         success: false,
         message: 'Failed to update risk.',
         error: error.message
+      });
+    }
+  }
+
+  static async deleteRisk(req, res) {
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        return res.status(400).json({ success: false, message: 'Risk ID is required.' });
+      }
+
+      let risk = await Risk.findById(parseInt(id));
+      if (!risk && isNaN(id)) {
+        risk = await Risk.findByRiskId(id);
+      }
+
+      if (!risk) {
+        return res.status(404).json({ success: false, message: 'Risk not found.' });
+      }
+
+      const dbId = risk.dbId || parseInt(id);
+      const deleted = await Risk.delete(dbId);
+
+      if (!deleted) {
+        return res.status(500).json({ success: false, message: 'Failed to delete risk.' });
+      }
+
+      res.json({ success: true, message: 'Risk deleted successfully.' });
+    } catch (error) {
+      console.error('Delete risk error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to delete risk.',
+        error: error.message,
       });
     }
   }
@@ -250,6 +342,33 @@ export class RiskController {
           success: false,
           message: 'Title and description are required.'
         });
+      }
+
+      const resolvedProjectId = projectId ? parseInt(projectId, 10) : null;
+      if (resolvedProjectId && req.staffId) {
+        const staff = await Staff.findById(req.staffId);
+        const project = await Project.findById(resolvedProjectId);
+        if (!project) {
+          return res.status(404).json({ success: false, message: 'Project not found.' });
+        }
+        const assignments = await getProjectAssignments(resolvedProjectId);
+        const isElevated = isElevatedProjectTeamCreator(staff);
+        const isPmPortal = isProjectManagerPortalStaff(staff);
+        const isViewerPortal = isViewerPortalStaff(staff);
+        const hasAccess = isElevated || (await userHasProjectAccess({ project, staff, assignments }));
+        if (!hasAccess) {
+          return res.status(403).json({
+            success: false,
+            message: 'You do not have access to add issues on this project.',
+          });
+        }
+        const projectRole = await resolveEffectiveProjectRole(req.staffId, resolvedProjectId, project);
+        if (!canCreateProjectRisks(projectRole, { isElevated, isPmPortal, isViewerPortal })) {
+          return res.status(403).json({
+            success: false,
+            message: 'Your project role cannot add risks or issues.',
+          });
+        }
       }
 
       let reportedByNameFinal = reportedByName;
@@ -415,6 +534,22 @@ export class RiskController {
       }
 
       const dbId = issue.dbId || parseInt(id);
+
+      if (req.staffId && issue.projectId) {
+        const staff = await Staff.findById(req.staffId);
+        const project = await Project.findById(issue.projectId);
+        const projectRole = await resolveEffectiveProjectRole(req.staffId, issue.projectId, project);
+        const isElevated = isElevatedProjectTeamCreator(staff);
+        const isPmPortal = isProjectManagerPortalStaff(staff);
+        const isSuperAdmin = (staff?.role || '').toLowerCase().replace(/\s+/g, '') === 'superadmin';
+        if (!canEvaluateProjectRisks(projectRole, { isPmPortal, isElevated, isSuperAdmin })) {
+          return res.status(403).json({
+            success: false,
+            message: 'Only project managers or administrators can evaluate and update issues.',
+          });
+        }
+      }
+
       const success = await Issue.update(dbId, updateData);
 
       if (success) {
@@ -436,6 +571,41 @@ export class RiskController {
         success: false,
         message: 'Failed to update issue.',
         error: error.message
+      });
+    }
+  }
+
+  static async deleteIssue(req, res) {
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        return res.status(400).json({ success: false, message: 'Issue ID is required.' });
+      }
+
+      let issue = await Issue.findById(parseInt(id));
+      if (!issue && isNaN(id)) {
+        issue = await Issue.findByIssueId(id);
+      }
+
+      if (!issue) {
+        return res.status(404).json({ success: false, message: 'Issue not found.' });
+      }
+
+      const dbId = issue.dbId || parseInt(id);
+      const deleted = await Issue.delete(dbId);
+
+      if (!deleted) {
+        return res.status(500).json({ success: false, message: 'Failed to delete issue.' });
+      }
+
+      res.json({ success: true, message: 'Issue deleted successfully.' });
+    } catch (error) {
+      console.error('Delete issue error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to delete issue.',
+        error: error.message,
       });
     }
   }
@@ -944,6 +1114,119 @@ export class RiskController {
         success: false,
         message: 'Failed to fetch risk statistics.',
         error: error.message
+      });
+    }
+  }
+
+  static async getRegisterComments(req, res) {
+    try {
+      const { itemType, itemId } = req.query;
+
+      if (!itemType || !itemId || !['risk', 'issue'].includes(String(itemType))) {
+        return res.status(400).json({
+          success: false,
+          message: 'itemType (risk|issue) and itemId are required',
+        });
+      }
+
+      const comments = await RiskIssueComment.findByItem(String(itemType), parseInt(itemId, 10));
+      res.json({ success: true, data: comments });
+    } catch (error) {
+      console.error('Get register comments error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch comments',
+        error: error.message,
+      });
+    }
+  }
+
+  static async createRegisterComment(req, res) {
+    try {
+      const { itemType, itemId, projectId, comment } = req.body;
+
+      if (!itemType || !itemId || !comment?.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'itemType, itemId, and comment are required',
+        });
+      }
+
+      if (!['risk', 'issue'].includes(String(itemType))) {
+        return res.status(400).json({
+          success: false,
+          message: 'itemType must be risk or issue',
+        });
+      }
+
+      const numericItemId = parseInt(itemId, 10);
+      const numericProjectId = projectId ? parseInt(projectId, 10) : null;
+
+      const permissions = await resolveStaffProjectPermissions(req.staffId, numericProjectId);
+      if (!permissions.canCommentOnRisks) {
+        return res.status(403).json({
+          success: false,
+          message: 'You do not have permission to comment on this register item',
+        });
+      }
+
+      if (numericProjectId) {
+        const project = await Project.findById(numericProjectId);
+        if (!project) {
+          return res.status(404).json({ success: false, message: 'Project not found' });
+        }
+        const assignments = await getProjectAssignments(numericProjectId);
+        const hasAccess =
+          permissions.isElevated ||
+          (await userHasProjectAccess({ project, staff: permissions.staff, assignments }));
+        if (!hasAccess) {
+          return res.status(403).json({
+            success: false,
+            message: 'You do not have access to this project',
+          });
+        }
+      }
+
+      if (itemType === 'risk') {
+        const risk = await Risk.findById(numericItemId);
+        if (!risk) {
+          return res.status(404).json({ success: false, message: 'Risk not found' });
+        }
+      } else {
+        const issue = await Issue.findById(numericItemId);
+        if (!issue) {
+          return res.status(404).json({ success: false, message: 'Issue not found' });
+        }
+      }
+
+      let staffName = 'User';
+      if (req.staffId) {
+        const staff = await Staff.findById(req.staffId);
+        if (staff) {
+          staffName = `${staff.firstName} ${staff.lastName}`.trim() || staffName;
+        }
+      }
+
+      const saved = await RiskIssueComment.create({
+        itemType,
+        itemId: numericItemId,
+        projectId: numericProjectId,
+        staffId: req.staffId || null,
+        staffName,
+        comment: String(comment).trim(),
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Comment added',
+        data: saved,
+      });
+    } catch (error) {
+      console.error('Create register comment error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to add comment',
+        error: error.message,
       });
     }
   }

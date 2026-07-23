@@ -1,6 +1,10 @@
 import pool from '../config/db.js';
 
+import { ensureTableColumns } from '../utils/schemaMigration.js';
+
 class Deliverable {
+  static schemaReady = false;
+
   static async createTable() {
     const query = `
       CREATE TABLE IF NOT EXISTS deliverables (
@@ -39,21 +43,21 @@ class Deliverable {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     await pool.execute(query);
-    
-    // Add new file fields if they don't exist (migration)
-    try {
-      await pool.execute(`
-        ALTER TABLE deliverables 
-        ADD COLUMN IF NOT EXISTS file_data LONGTEXT NULL,
-        ADD COLUMN IF NOT EXISTS file_name VARCHAR(255) NULL,
-        ADD COLUMN IF NOT EXISTS file_type VARCHAR(100) NULL
-      `);
-    } catch (error) {
-      // Columns might already exist, ignore error
-      console.log('Note: file_data, file_name, and file_type columns may already exist');
-    }
-    
+    await this.ensureSchemaFields();
     console.log('Deliverables table created or already exists.');
+  }
+
+  static async ensureSchemaFields() {
+    if (this.schemaReady) return;
+
+    await ensureTableColumns('deliverables', [
+      { name: 'file_data', ddl: 'ADD COLUMN file_data LONGTEXT NULL' },
+      { name: 'file_name', ddl: 'ADD COLUMN file_name VARCHAR(255) NULL' },
+      { name: 'file_type', ddl: 'ADD COLUMN file_type VARCHAR(100) NULL' },
+      { name: 'file_size', ddl: 'ADD COLUMN file_size VARCHAR(50) NULL' },
+    ]);
+
+    this.schemaReady = true;
   }
 
   static async generateDeliverableId() {
@@ -85,6 +89,7 @@ class Deliverable {
     version = '1.0',
     priority = 'medium'
   }) {
+    await this.ensureSchemaFields();
     const delId = deliverableId || await this.generateDeliverableId();
 
     const [result] = await pool.execute(

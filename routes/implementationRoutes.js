@@ -15,6 +15,7 @@ router.post('/start-from-proposal/:opportunityId', (req, res) => {
 router.get('/', ImplementationController.getImplementations);
 
 router.get('/by-project/:projectId/workspace', ImplementationController.getWorkspaceByProject);
+router.post('/by-project/:projectId/start-workflow', ImplementationController.startWorkflowForProject);
 router.get('/:id/workspace', ImplementationController.getWorkspace);
 router.post('/:id/ensure-project', ImplementationController.ensureProject);
 router.get('/:id', ImplementationController.getImplementationById);

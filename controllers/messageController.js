@@ -1,9 +1,44 @@
 import pool from '../config/db.js';
 
+function formatLastMessagePreview(content, messageType, fileName) {
+  if (!content && messageType === 'text') return null;
+  switch (messageType) {
+    case 'voice':
+      return 'Voice message';
+    case 'image':
+      return 'Photo';
+    case 'file':
+      return fileName || 'File';
+    default:
+      if (content?.startsWith('data:')) return 'Attachment';
+      if (content?.startsWith('Replying to:')) {
+        const lines = content.split('\n\n');
+        return lines.length > 1 ? lines[1].slice(0, 80) : lines[0].slice(0, 80);
+      }
+      return content.length > 100 ? `${content.slice(0, 100)}...` : content;
+  }
+}
+
+async function ensureMessagesSchema() {
+  try {
+    const [columns] = await pool.execute(
+      `SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages' AND COLUMN_NAME = 'content'`,
+    );
+    if (columns.length > 0 && columns[0].DATA_TYPE === 'text') {
+      await pool.execute('ALTER TABLE messages MODIFY COLUMN content LONGTEXT NOT NULL');
+      console.log('Messages: widened content column to LONGTEXT.');
+    }
+  } catch (error) {
+    console.warn('Messages schema ensure warning:', error.message);
+  }
+}
+
 export class MessageController {
   // Create a new message
   static async createMessage(req, res) {
     try {
+      await ensureMessagesSchema();
       const {
         senderId,
         receiverId,
@@ -184,7 +219,7 @@ export class MessageController {
       const conversationsWithLastMessage = await Promise.all(
         conversations.map(async (conv) => {
           const [lastMessage] = await pool.execute(
-            `SELECT content, message_type FROM messages 
+            `SELECT content, message_type, file_name FROM messages 
              WHERE ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))
              ORDER BY created_at DESC LIMIT 1`,
             [userId, conv.participant_id, conv.participant_id, userId]
@@ -192,8 +227,13 @@ export class MessageController {
 
           return {
             ...conv,
-            last_message_content: lastMessage[0]?.content || null,
-            last_message_type: lastMessage[0]?.message_type || 'text'
+            last_message_content: formatLastMessagePreview(
+              lastMessage[0]?.content,
+              lastMessage[0]?.message_type || 'text',
+              lastMessage[0]?.file_name,
+            ),
+            last_message_type: lastMessage[0]?.message_type || 'text',
+            last_message_file_name: lastMessage[0]?.file_name || null,
           };
         })
       );

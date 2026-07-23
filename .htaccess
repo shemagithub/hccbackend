@@ -1,0 +1,8 @@
+Options -Indexes
+
+# cPanel Node.js deployment:
+# 1. Build frontend:  cd hcc && npm run build
+# 2. Copy build:      cp -r hcc/dist/* hccbackend/public/
+# 3. Setup Node.js App: startup file = app.js, root = hccbackend folder
+# 4. Set .env: NODE_ENV=production, RUN_SCHEMA_INIT=false, cPanel MySQL credentials
+# 5. Run npm install in hccbackend, then Restart app

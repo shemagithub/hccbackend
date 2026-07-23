@@ -8,23 +8,74 @@ import Risk from '../models/Risk.js';
 import Issue from '../models/Issue.js';
 import Staff from '../models/Staff.js';
 import pool from '../config/db.js';
+import { buildProjectReportFilters } from '../utils/projectReportAccess.js';
+import {
+  buildImplementationReport,
+  renderImplementationPdf,
+  renderImplementationCsv,
+  renderPerformancePdf,
+  renderPerformanceCsv,
+} from '../utils/projectImplementationReport.js';
 
 export class ProjectReportController {
+  static async resolveProjectFilters(req, { projectId, department } = {}) {
+    const staff = await Staff.findById(req.staffId);
+    const result = await buildProjectReportFilters(req.staffId, staff, { projectId, department });
+    return { staff, ...result };
+  }
+
+  // Get comprehensive implementation report for a project
+  static async getImplementationReport(req, res) {
+    try {
+      const { projectId } = req.query;
+      if (!projectId) {
+        return res.status(400).json({
+          success: false,
+          message: 'projectId is required.',
+        });
+      }
+
+      const { error, message } = await ProjectReportController.resolveProjectFilters(req, {
+        projectId,
+      });
+
+      if (error === 'FORBIDDEN') {
+        return res.status(403).json({ success: false, message });
+      }
+
+      const report = await buildImplementationReport(parseInt(projectId, 10));
+      if (!report) {
+        return res.status(404).json({
+          success: false,
+          message: 'Project not found.',
+        });
+      }
+
+      res.json({ success: true, data: report });
+    } catch (error) {
+      console.error('Get implementation report error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to generate implementation report.',
+        error: error.message,
+      });
+    }
+  }
+
   // Get Performance Report
   static async getPerformanceReport(req, res) {
     try {
       const { projectId, department, startDate, endDate } = req.query;
-      const staff = await Staff.findById(req.staffId);
+      const { staff, filters, error, message } = await ProjectReportController.resolveProjectFilters(req, {
+        projectId,
+        department,
+      });
 
-      // Build filters
-      const projectFilters = {};
-      if (projectId) projectFilters.projectId = parseInt(projectId);
-      if (department) projectFilters.department = department;
-      if (staff && staff.role !== 'superadmin' && staff.role !== 'admin') {
-        projectFilters.userEmail = staff.email;
+      if (error === 'FORBIDDEN') {
+        return res.status(403).json({ success: false, message });
       }
 
-      // Get projects
+      const projectFilters = filters;
       const projects = await Project.findAll(projectFilters);
       const projectStats = await Project.getStats(projectFilters);
 
@@ -54,13 +105,19 @@ export class ProjectReportController {
       const approvedReviews = parseInt(reviewStats.approved || 0);
 
       // Calculate averages
-      const averageCompletion = totalProjects > 0 
-        ? projects.reduce((sum, p) => sum + (parseFloat(p.progress) || 0), 0) / totalProjects 
-        : 0;
-      
-      const onTimeDelivery = totalProjects > 0
+      const scopedToSingleProject = Boolean(projectId) && projects.length === 1;
+      const averageCompletion = scopedToSingleProject
+        ? parseFloat(projects[0].progress) || 0
+        : totalProjects > 0
+          ? projects.reduce((sum, p) => sum + (parseFloat(p.progress) || 0), 0) / totalProjects
+          : 0;
+
+      let onTimeDelivery = totalProjects > 0
         ? (completedProjects / totalProjects) * 100
         : 0;
+      if (scopedToSingleProject && completedProjects === 0) {
+        onTimeDelivery = totalTasks > 0 ? (completedTasks / totalTasks) * 100 : averageCompletion;
+      }
 
       const qualityScore = totalDeliverables > 0
         ? (approvedDeliverables / totalDeliverables) * 100
@@ -114,7 +171,6 @@ export class ProjectReportController {
   static async getDepartmentSummary(req, res) {
     try {
       const { department, projectId } = req.query;
-      const staff = await Staff.findById(req.staffId);
 
       if (!department) {
         return res.status(400).json({
@@ -123,12 +179,16 @@ export class ProjectReportController {
         });
       }
 
-      // Build filters
-      const projectFilters = { department };
-      if (projectId) projectFilters.projectId = parseInt(projectId);
-      if (staff && staff.role !== 'superadmin' && staff.role !== 'admin') {
-        projectFilters.userEmail = staff.email;
+      const { filters, error, message } = await ProjectReportController.resolveProjectFilters(req, {
+        projectId,
+        department,
+      });
+
+      if (error === 'FORBIDDEN') {
+        return res.status(403).json({ success: false, message });
       }
+
+      const projectFilters = filters;
 
       // Get projects
       const projects = await Project.findAll(projectFilters);
@@ -198,15 +258,16 @@ export class ProjectReportController {
   static async getMetricsReport(req, res) {
     try {
       const { projectId, department, startDate, endDate } = req.query;
-      const staff = await Staff.findById(req.staffId);
+      const { filters, error, message } = await ProjectReportController.resolveProjectFilters(req, {
+        projectId,
+        department,
+      });
 
-      // Build filters
-      const projectFilters = {};
-      if (projectId) projectFilters.projectId = parseInt(projectId);
-      if (department) projectFilters.department = department;
-      if (staff && staff.role !== 'superadmin' && staff.role !== 'admin') {
-        projectFilters.userEmail = staff.email;
+      if (error === 'FORBIDDEN') {
+        return res.status(403).json({ success: false, message });
       }
+
+      const projectFilters = filters;
 
       // Get projects
       const projects = await Project.findAll(projectFilters);
@@ -329,15 +390,16 @@ export class ProjectReportController {
   static async getReportStats(req, res) {
     try {
       const { projectId, department } = req.query;
-      const staff = await Staff.findById(req.staffId);
+      const { filters, error, message } = await ProjectReportController.resolveProjectFilters(req, {
+        projectId,
+        department,
+      });
 
-      // Build filters
-      const projectFilters = {};
-      if (projectId) projectFilters.projectId = parseInt(projectId);
-      if (department) projectFilters.department = department;
-      if (staff && staff.role !== 'superadmin' && staff.role !== 'admin') {
-        projectFilters.userEmail = staff.email;
+      if (error === 'FORBIDDEN') {
+        return res.status(403).json({ success: false, message });
       }
+
+      const projectFilters = filters;
 
       // Get all stats
       const projectStats = await Project.getStats(projectFilters);
@@ -377,11 +439,52 @@ export class ProjectReportController {
     try {
       const { type, format = 'pdf', projectId, department, startDate, endDate } = req.query;
       const staff = await Staff.findById(req.staffId);
+      const generatedBy = staff ? `${staff.firstName} ${staff.lastName}` : 'System';
 
       if (!type) {
         return res.status(400).json({
           success: false,
-          message: 'Report type is required (performance, department, metrics).'
+          message: 'Report type is required (implementation, performance, department, metrics).'
+        });
+      }
+
+      if (type === 'implementation') {
+        if (!projectId) {
+          return res.status(400).json({
+            success: false,
+            message: 'projectId is required for implementation report export.',
+          });
+        }
+
+        const { error, message } = await ProjectReportController.resolveProjectFilters(req, { projectId });
+        if (error === 'FORBIDDEN') {
+          return res.status(403).json({ success: false, message });
+        }
+
+        const report = await buildImplementationReport(parseInt(projectId, 10));
+        if (!report) {
+          return res.status(404).json({ success: false, message: 'Project not found.' });
+        }
+
+        const safeName = (report.project.name || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        if (format === 'pdf') {
+          const pdfBuffer = await renderImplementationPdf(report, generatedBy);
+          res.setHeader('Content-Type', 'application/pdf');
+          res.setHeader('Content-Disposition', `attachment; filename="${safeName}-implementation-report-${Date.now()}.pdf"`);
+          return res.send(pdfBuffer);
+        }
+
+        if (format === 'excel' || format === 'csv') {
+          const csvContent = renderImplementationCsv(report, generatedBy);
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+          const extension = format === 'excel' ? 'csv' : 'csv';
+          res.setHeader('Content-Disposition', `attachment; filename="${safeName}-implementation-report-${Date.now()}.${extension}`);
+          return res.send('\uFEFF' + csvContent);
+        }
+
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid format. Use "pdf", "excel", or "csv".'
         });
       }
 
@@ -389,13 +492,16 @@ export class ProjectReportController {
 
       // Get report data based on type
       if (type === 'performance') {
-        const projectFilters = {};
-        if (projectId) projectFilters.projectId = parseInt(projectId);
-        if (department) projectFilters.department = department;
-        if (staff && staff.role !== 'superadmin' && staff.role !== 'admin') {
-          projectFilters.userEmail = staff.email;
+        const { filters, error, message } = await ProjectReportController.resolveProjectFilters(req, {
+          projectId,
+          department,
+        });
+
+        if (error === 'FORBIDDEN') {
+          return res.status(403).json({ success: false, message });
         }
 
+        const projectFilters = filters;
         const projects = await Project.findAll(projectFilters);
         const projectStats = await Project.getStats(projectFilters);
         const taskStats = await Task.getStats(parseInt(projectId) || null);
@@ -432,12 +538,16 @@ export class ProjectReportController {
           });
         }
 
-        const projectFilters = { department };
-        if (projectId) projectFilters.projectId = parseInt(projectId);
-        if (staff && staff.role !== 'superadmin' && staff.role !== 'admin') {
-          projectFilters.userEmail = staff.email;
+        const { filters, error, message } = await ProjectReportController.resolveProjectFilters(req, {
+          projectId,
+          department,
+        });
+
+        if (error === 'FORBIDDEN') {
+          return res.status(403).json({ success: false, message });
         }
 
+        const projectFilters = filters;
         const projectStats = await Project.getStats(projectFilters);
         const taskStats = await Task.getStats(parseInt(projectId) || null);
         const deliverableStats = await Deliverable.getStats(parseInt(projectId) || null);
@@ -458,13 +568,16 @@ export class ProjectReportController {
           approvedDeliverables: parseInt(deliverableStats.approved || 0)
         };
       } else if (type === 'metrics') {
-        const projectFilters = {};
-        if (projectId) projectFilters.projectId = parseInt(projectId);
-        if (department) projectFilters.department = department;
-        if (staff && staff.role !== 'superadmin' && staff.role !== 'admin') {
-          projectFilters.userEmail = staff.email;
+        const { filters, error, message } = await ProjectReportController.resolveProjectFilters(req, {
+          projectId,
+          department,
+        });
+
+        if (error === 'FORBIDDEN') {
+          return res.status(403).json({ success: false, message });
         }
 
+        const projectFilters = filters;
         const projectStats = await Project.getStats(projectFilters);
         const taskStats = await Task.getStats(parseInt(projectId) || null);
         const deliverableStats = await Deliverable.getStats(parseInt(projectId) || null);
@@ -498,88 +611,26 @@ export class ProjectReportController {
 
       // Generate export based on format
       if (format === 'pdf') {
-        let pdfContent = `${reportData.title.toUpperCase()}\n`;
-        pdfContent += `Generated by: ${reportData.generatedBy}\n`;
-        pdfContent += `Generated at: ${new Date(reportData.generatedAt).toLocaleString()}\n\n`;
-        
-        if (reportData.period) pdfContent += `Period: ${reportData.period}\n`;
-        if (reportData.department) pdfContent += `Department: ${reportData.department}\n`;
-        pdfContent += `\n`;
-
-        if (type === 'performance') {
-          pdfContent += `Total Projects: ${reportData.totalProjects}\n`;
-          pdfContent += `Active Projects: ${reportData.activeProjects}\n`;
-          pdfContent += `Completed Projects: ${reportData.completedProjects}\n`;
-          pdfContent += `Average Completion: ${reportData.averageCompletion}%\n`;
-          pdfContent += `On-Time Delivery: ${reportData.onTimeDelivery}%\n`;
-          pdfContent += `Quality Score: ${reportData.qualityScore}%\n`;
-          pdfContent += `Budget Efficiency: ${reportData.budgetEfficiency}%\n`;
-        } else if (type === 'department') {
-          pdfContent += `Total Projects: ${reportData.totalProjects}\n`;
-          pdfContent += `Active Projects: ${reportData.activeProjects}\n`;
-          pdfContent += `Completed Projects: ${reportData.completedProjects}\n`;
-          pdfContent += `Total Budget: $${reportData.totalBudget.toLocaleString()}\n`;
-          pdfContent += `Used Budget: $${reportData.usedBudget.toLocaleString()}\n`;
-          pdfContent += `Total Tasks: ${reportData.totalTasks}\n`;
-          pdfContent += `Completed Tasks: ${reportData.completedTasks}\n`;
-        } else if (type === 'metrics') {
-          pdfContent += `METRICS\n`;
-          pdfContent += `Metric | Target | Actual | Variance\n`;
-          pdfContent += `-`.repeat(50) + `\n`;
-          reportData.metrics.forEach(m => {
-            pdfContent += `${m.metric} | ${m.target}% | ${m.actual}% | ${m.variance > 0 ? '+' : ''}${m.variance}%\n`;
-          });
-        }
-
+        const pdfBuffer = await renderPerformancePdf(reportData);
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${reportData.title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.pdf"`);
-        res.send(pdfContent);
-      } else if (format === 'excel' || format === 'csv') {
-        let csvContent = `${reportData.title}\n`;
-        csvContent += `Generated by,${reportData.generatedBy}\n`;
-        csvContent += `Generated at,${new Date(reportData.generatedAt).toLocaleString()}\n\n`;
-
-        if (reportData.period) csvContent += `Period,${reportData.period}\n`;
-        if (reportData.department) csvContent += `Department,${reportData.department}\n`;
-        csvContent += `\n`;
-
-        if (type === 'performance') {
-          csvContent += `Metric,Value\n`;
-          csvContent += `Total Projects,${reportData.totalProjects}\n`;
-          csvContent += `Active Projects,${reportData.activeProjects}\n`;
-          csvContent += `Completed Projects,${reportData.completedProjects}\n`;
-          csvContent += `Average Completion,${reportData.averageCompletion}%\n`;
-          csvContent += `On-Time Delivery,${reportData.onTimeDelivery}%\n`;
-          csvContent += `Quality Score,${reportData.qualityScore}%\n`;
-          csvContent += `Budget Efficiency,${reportData.budgetEfficiency}%\n`;
-        } else if (type === 'department') {
-          csvContent += `Metric,Value\n`;
-          csvContent += `Total Projects,${reportData.totalProjects}\n`;
-          csvContent += `Active Projects,${reportData.activeProjects}\n`;
-          csvContent += `Completed Projects,${reportData.completedProjects}\n`;
-          csvContent += `Total Budget,$${reportData.totalBudget.toLocaleString()}\n`;
-          csvContent += `Used Budget,$${reportData.usedBudget.toLocaleString()}\n`;
-        } else if (type === 'metrics') {
-          csvContent += `Metric,Target,Actual,Variance\n`;
-          reportData.metrics.forEach(m => {
-            csvContent += `${m.metric},${m.target}%,${m.actual}%,${m.variance > 0 ? '+' : ''}${m.variance}%\n`;
-          });
-        }
-
-        const contentType = format === 'excel' 
-          ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-          : 'text/csv';
-        const extension = format === 'excel' ? 'xlsx' : 'csv';
-
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Content-Disposition', `attachment; filename="${reportData.title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.${extension}"`);
-        res.send(csvContent);
-      } else {
-        res.status(400).json({
-          success: false,
-          message: 'Invalid format. Use "pdf", "excel", or "csv".'
-        });
+        return res.send(pdfBuffer);
       }
+
+      if (format === 'excel' || format === 'csv') {
+        const csvContent = type === 'metrics' && reportData.metrics
+          ? ['Metric,Target,Actual,Variance', ...reportData.metrics.map((m) => `${m.metric},${m.target}%,${m.actual}%,${m.variance > 0 ? '+' : ''}${m.variance}%`)].join('\n')
+          : renderPerformanceCsv(reportData);
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${reportData.title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.csv"`);
+        return res.send('\uFEFF' + csvContent);
+      }
+
+      res.status(400).json({
+        success: false,
+        message: 'Invalid format. Use "pdf", "excel", or "csv".'
+      });
     } catch (error) {
       console.error('Export report error:', error);
       res.status(500).json({

@@ -1,4 +1,5 @@
 import express from 'express';
+import { authenticate } from '../middleware/auth.js';
 import { RoleController } from '../controllers/roleController.js';
 
 const {
@@ -8,15 +9,18 @@ const {
   updateRole,
   deleteRole,
   getRoleStats,
-  checkRoleName
+  checkRoleName,
+  getPermissionCatalog,
+  getMyAccess,
 } = RoleController;
 
 const router = express.Router();
 
-// Role routes
 router.post('/', createRole);
 router.get('/', getRoles);
 router.get('/stats', getRoleStats);
+router.get('/catalog', getPermissionCatalog);
+router.get('/my-access', authenticate, getMyAccess);
 router.get('/check-name/:name', checkRoleName);
 router.get('/:id', getRoleById);
 router.put('/:id', updateRole);

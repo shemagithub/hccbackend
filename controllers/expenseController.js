@@ -1,5 +1,17 @@
 import Expense from '../models/Expense.js';
 import Staff from '../models/Staff.js';
+import { resolveStaffProjectPermissions } from '../utils/projectTeam.js';
+
+async function resolveExpenseByParamId(id) {
+  if (!id) return null;
+
+  if (!Number.isNaN(Number(id))) {
+    const byDbId = await Expense.findById(parseInt(id, 10));
+    if (byDbId) return byDbId;
+  }
+
+  return Expense.findByExpenseId(String(id));
+}
 
 export class ExpenseController {
   // Create a new expense
@@ -28,6 +40,14 @@ export class ExpenseController {
         return res.status(400).json({
           success: false,
           message: 'Category, description, amount, and expense date are required.'
+        });
+      }
+
+      const permissions = await resolveStaffProjectPermissions(req.staffId, projectId ? parseInt(projectId, 10) : null);
+      if (!permissions.canRequestExpenses) {
+        return res.status(403).json({
+          success: false,
+          message: 'Viewers cannot request expenses',
         });
       }
 
@@ -97,6 +117,10 @@ export class ExpenseController {
         vendor: vendor || null,
         invoiceNumber: invoiceNumber || null
       });
+
+      if (expense?.projectId) {
+        await Expense.syncProjectSpentFromExpenses(expense.projectId);
+      }
 
       res.status(201).json({
         success: true,
@@ -211,17 +235,7 @@ export class ExpenseController {
         });
       }
 
-      let expense = null;
-
-      // If numeric, try database ID first
-      if (!Number.isNaN(Number(id))) {
-        expense = await Expense.findById(parseInt(id));
-      }
-
-      // If not found yet, try expense_id (e.g. "EXP-2026-0002")
-      if (!expense) {
-        expense = await Expense.findByExpenseId(id);
-      }
+      let expense = await resolveExpenseByParamId(id);
 
       if (!expense) {
         return res.status(404).json({
@@ -258,16 +272,7 @@ export class ExpenseController {
         });
       }
 
-      // Try to find by database ID first
-      let expense = await Expense.findById(parseInt(id));
-      
-      // If not found by database ID, try to find by expense_id
-      if (!expense && isNaN(id)) {
-        const expenses = await Expense.findAll({ search: id, limit: 1 });
-        if (expenses.length > 0 && expenses[0].id === id) {
-          expense = expenses[0];
-        }
-      }
+      const expense = await resolveExpenseByParamId(id);
 
       if (!expense) {
         return res.status(404).json({
@@ -315,6 +320,13 @@ export class ExpenseController {
 
       if (success) {
         const updatedExpense = await Expense.findById(expense.dbId);
+        const projectRef = updatedExpense?.projectId || expense.projectId;
+        if (projectRef) {
+          await Expense.syncProjectSpentFromExpenses(projectRef);
+        }
+        if (updateData.projectId && updateData.projectId !== expense.projectId) {
+          await Expense.syncProjectSpentFromExpenses(expense.projectId);
+        }
         res.json({
           success: true,
           message: 'Expense updated successfully.',
@@ -348,16 +360,7 @@ export class ExpenseController {
         });
       }
 
-      // Try to find by database ID first
-      let expense = await Expense.findById(parseInt(id));
-      
-      // If not found by database ID, try to find by expense_id
-      if (!expense && isNaN(id)) {
-        const expenses = await Expense.findAll({ search: id, limit: 1 });
-        if (expenses.length > 0 && expenses[0].id === id) {
-          expense = expenses[0];
-        }
-      }
+      const expense = await resolveExpenseByParamId(id);
 
       if (!expense) {
         return res.status(404).json({
@@ -367,9 +370,13 @@ export class ExpenseController {
       }
 
       // Use dbId for delete
+      const projectRef = expense.projectId;
       const success = await Expense.delete(expense.dbId);
 
       if (success) {
+        if (projectRef) {
+          await Expense.syncProjectSpentFromExpenses(projectRef);
+        }
         res.json({
           success: true,
           message: 'Expense deleted successfully.'

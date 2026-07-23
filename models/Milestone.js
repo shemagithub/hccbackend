@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import { toMysqlDate } from '../utils/mysqlDate.js';
 
 class Milestone {
   static async createTable() {
@@ -63,7 +64,7 @@ class Milestone {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         mId, projectId || null, name, description || null, phase || null,
-        targetDate, actualDate || null, status, progress,
+        toMysqlDate(targetDate), toMysqlDate(actualDate ?? null), status, progress,
         createdBy || null, createdByName || null, notes || null
       ]
     );
@@ -151,10 +152,13 @@ class Milestone {
       notes: 'notes'
     };
 
+    const dateFields = new Set(['targetDate', 'actualDate']);
+
     Object.keys(updateData).forEach(key => {
       if (updateData[key] !== undefined && fieldMapping[key]) {
         updateFields.push(`${fieldMapping[key]} = ?`);
-        params.push(updateData[key]);
+        const value = dateFields.has(key) ? toMysqlDate(updateData[key]) : updateData[key];
+        params.push(value);
       }
     });
 
@@ -202,7 +206,7 @@ class Milestone {
       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
       SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as inProgress,
       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-      SUM(CASE WHEN status = 'delayed' THEN 1 ELSE 0 END) as delayed
+      SUM(CASE WHEN status = 'delayed' THEN 1 ELSE 0 END) as delayedCount
     FROM milestones WHERE 1=1`;
     const params = [];
 
@@ -212,7 +216,14 @@ class Milestone {
     }
 
     const [rows] = await pool.execute(query, params);
-    return rows[0];
+    const row = rows[0] || {};
+    return {
+      total: Number(row.total || 0),
+      completed: Number(row.completed || 0),
+      inProgress: Number(row.inProgress || 0),
+      pending: Number(row.pending || 0),
+      delayed: Number(row.delayedCount || 0),
+    };
   }
 }
 

@@ -1,6 +1,9 @@
 import pool from '../config/db.js';
+import { ensureTableColumns } from '../utils/schemaMigration.js';
 
 class Task {
+  static schemaReady = false;
+
   static async createTable() {
     const query = `
       CREATE TABLE IF NOT EXISTS tasks (
@@ -22,6 +25,14 @@ class Task {
         actual_hours DECIMAL(10,2) NULL,
         dependencies TEXT NULL,
         tags TEXT NULL,
+        attachment_data LONGTEXT NULL,
+        attachment_name VARCHAR(255) NULL,
+        attachment_type VARCHAR(100) NULL,
+        attachment_size VARCHAR(50) NULL,
+        approval_status ENUM('not_required', 'pending_approval', 'approved', 'rejected') DEFAULT 'not_required',
+        approved_by INT NULL,
+        approval_notes TEXT NULL,
+        submitted_at TIMESTAMP NULL,
         created_by INT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -35,30 +46,58 @@ class Task {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `;
     await pool.execute(query);
-    
-    // Add new columns if they don't exist (for existing tables)
-    try {
-      await pool.execute(`
-        ALTER TABLE tasks 
-        ADD COLUMN IF NOT EXISTS assignee_ids TEXT NULL,
-        ADD COLUMN IF NOT EXISTS assignee_names TEXT NULL
-      `);
-    } catch (error) {
-      // Columns might already exist, ignore error
-      console.log('Note: assignee_ids and assignee_names columns may already exist');
-    }
-    
+    await this.ensureSchemaFields();
     console.log('Tasks table created or already exists.');
   }
 
+  static async ensureSchemaFields() {
+    if (this.schemaReady) return;
+
+    await ensureTableColumns('tasks', [
+      { name: 'assignee_ids', ddl: 'ADD COLUMN assignee_ids TEXT NULL' },
+      { name: 'assignee_names', ddl: 'ADD COLUMN assignee_names TEXT NULL' },
+      { name: 'attachment_data', ddl: 'ADD COLUMN attachment_data LONGTEXT NULL' },
+      { name: 'attachment_name', ddl: 'ADD COLUMN attachment_name VARCHAR(255) NULL' },
+      { name: 'attachment_type', ddl: 'ADD COLUMN attachment_type VARCHAR(100) NULL' },
+      { name: 'attachment_size', ddl: 'ADD COLUMN attachment_size VARCHAR(50) NULL' },
+      {
+        name: 'approval_status',
+        ddl: "ADD COLUMN approval_status ENUM('not_required', 'pending_approval', 'approved', 'rejected') DEFAULT 'not_required'",
+      },
+      { name: 'approved_by', ddl: 'ADD COLUMN approved_by INT NULL' },
+      { name: 'approval_notes', ddl: 'ADD COLUMN approval_notes TEXT NULL' },
+      { name: 'submitted_at', ddl: 'ADD COLUMN submitted_at TIMESTAMP NULL' },
+      { name: 'approval_stage', ddl: "ADD COLUMN approval_stage VARCHAR(50) DEFAULT 'none'" },
+      { name: 'submitted_by', ddl: 'ADD COLUMN submitted_by INT NULL' },
+      { name: 'submitter_role', ddl: 'ADD COLUMN submitter_role VARCHAR(50) NULL' },
+      { name: 'team_lead_approved_by', ddl: 'ADD COLUMN team_lead_approved_by INT NULL' },
+      { name: 'team_lead_approved_at', ddl: 'ADD COLUMN team_lead_approved_at TIMESTAMP NULL' },
+      { name: 'pm_approved_by', ddl: 'ADD COLUMN pm_approved_by INT NULL' },
+      { name: 'pm_approved_at', ddl: 'ADD COLUMN pm_approved_at TIMESTAMP NULL' },
+      { name: 'superadmin_approved_by', ddl: 'ADD COLUMN superadmin_approved_by INT NULL' },
+      { name: 'superadmin_approved_at', ddl: 'ADD COLUMN superadmin_approved_at TIMESTAMP NULL' },
+    ]);
+
+    this.schemaReady = true;
+  }
+
   static async generateTaskId() {
-    const [rows] = await pool.execute(
-      'SELECT COUNT(*) as count FROM tasks WHERE YEAR(created_at) = YEAR(NOW())'
-    );
-    const count = rows[0].count;
     const year = new Date().getFullYear();
-    const sequence = String(count + 1).padStart(4, '0');
-    return `TASK-${year}-${sequence}`;
+    const prefix = `TASK-${year}-`;
+    const [rows] = await pool.execute(
+      'SELECT task_id FROM tasks WHERE task_id LIKE ?',
+      [`${prefix}%`]
+    );
+
+    let maxSeq = 0;
+    for (const row of rows) {
+      const match = String(row.task_id).match(/-(\d+)$/);
+      if (match) {
+        maxSeq = Math.max(maxSeq, parseInt(match[1], 10));
+      }
+    }
+
+    return `${prefix}${String(maxSeq + 1).padStart(4, '0')}`;
   }
 
   static async create({
@@ -79,10 +118,27 @@ class Task {
     actualHours,
     dependencies,
     tags,
+    attachmentData,
+    attachmentName,
+    attachmentType,
+    attachmentSize,
+    approvalStatus = 'not_required',
+    approvalStage = 'none',
+    approvedBy = null,
+    approvalNotes = null,
+    submittedAt = null,
+    submittedBy = null,
+    submitterRole = null,
+    teamLeadApprovedBy = null,
+    teamLeadApprovedAt = null,
+    pmApprovedBy = null,
+    pmApprovedAt = null,
+    superadminApprovedBy = null,
+    superadminApprovedAt = null,
     createdBy
   }) {
-    const tId = taskId || await this.generateTaskId();
-    
+    await this.ensureSchemaFields();
+
     // Clean and validate title
     const cleanTitle = title ? String(title).trim() : '';
     if (!cleanTitle) {
@@ -173,39 +229,62 @@ class Task {
     const cleanEstimatedHours = estimatedHours && !isNaN(parseFloat(estimatedHours)) ? parseFloat(estimatedHours) : null;
     const cleanActualHours = actualHours && !isNaN(parseFloat(actualHours)) ? parseFloat(actualHours) : null;
 
-    console.log('Inserting task with data:', {
-      taskId: tId,
-      projectId: cleanProjectId,
-      title: cleanTitle,
-      description: cleanDescription,
-      assigneeId: primaryAssigneeId,
-      assigneeName: primaryAssigneeName,
-      assigneeIds: assigneeIdsJson,
-      assigneeNames: assigneeNamesJson,
-      status: cleanStatus,
-      priority: cleanPriority,
-      startDate: cleanStartDate,
-      dueDate: cleanDueDate,
-      progress: cleanProgress,
-      estimatedHours: cleanEstimatedHours,
-      actualHours: cleanActualHours,
-      dependencies: depsJson,
-      tags: tagsJson
-    });
-
-    const [result] = await pool.execute(
-      `INSERT INTO tasks (
+    const insertSql = `INSERT INTO tasks (
         task_id, project_id, title, description, assignee_id, assignee_name, assignee_ids, assignee_names, status, priority,
-        start_date, due_date, progress, estimated_hours, actual_hours, dependencies, tags, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        tId, cleanProjectId, cleanTitle, cleanDescription, primaryAssigneeId, primaryAssigneeName,
-        assigneeIdsJson, assigneeNamesJson, cleanStatus, cleanPriority, cleanStartDate, cleanDueDate, cleanProgress, 
-        cleanEstimatedHours, cleanActualHours, depsJson, tagsJson, createdBy || null
-      ]
-    );
+        start_date, due_date, progress, estimated_hours, actual_hours, dependencies, tags,
+        attachment_data, attachment_name, attachment_type, attachment_size,
+        approval_status, approval_stage, approved_by, approval_notes, submitted_at, submitted_by, submitter_role,
+        team_lead_approved_by, team_lead_approved_at, pm_approved_by, pm_approved_at,
+        superadmin_approved_by, superadmin_approved_at, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-    return await this.findById(result.insertId);
+    const insertParams = [
+      null,
+      cleanProjectId, cleanTitle, cleanDescription, primaryAssigneeId, primaryAssigneeName,
+      assigneeIdsJson, assigneeNamesJson, cleanStatus, cleanPriority, cleanStartDate, cleanDueDate, cleanProgress,
+      cleanEstimatedHours, cleanActualHours, depsJson, tagsJson,
+      attachmentData || null, attachmentName || null, attachmentType || null, attachmentSize || null,
+      approvalStatus || 'not_required', approvalStage || 'none', approvedBy || null, approvalNotes || null,
+      submittedAt || null, submittedBy || null, submitterRole || null,
+      teamLeadApprovedBy || null, teamLeadApprovedAt || null, pmApprovedBy || null, pmApprovedAt || null,
+      superadminApprovedBy || null, superadminApprovedAt || null,
+      createdBy || null,
+    ];
+
+    let resolvedTaskId = taskId || null;
+    let lastError = null;
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (!resolvedTaskId) {
+        resolvedTaskId = await this.generateTaskId();
+      }
+      insertParams[0] = resolvedTaskId;
+
+      console.log('Inserting task with data:', {
+        taskId: resolvedTaskId,
+        projectId: cleanProjectId,
+        title: cleanTitle,
+        tags: tagsJson,
+      });
+
+      try {
+        const [result] = await pool.execute(insertSql, insertParams);
+        return await this.findById(result.insertId);
+      } catch (error) {
+        lastError = error;
+        const isDuplicateTaskId =
+          error?.code === 'ER_DUP_ENTRY' &&
+          String(error?.sqlMessage || '').includes('task_id');
+
+        if (!taskId && isDuplicateTaskId && attempt < 4) {
+          resolvedTaskId = null;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw lastError || new Error('Failed to generate a unique task ID');
   }
 
   static async findAll(filters = {}) {
@@ -315,7 +394,24 @@ class Task {
       estimatedHours: 'estimated_hours',
       actualHours: 'actual_hours',
       dependencies: 'dependencies',
-      tags: 'tags'
+      tags: 'tags',
+      attachmentData: 'attachment_data',
+      attachmentName: 'attachment_name',
+      attachmentType: 'attachment_type',
+      attachmentSize: 'attachment_size',
+      approvalStatus: 'approval_status',
+      approvalStage: 'approval_stage',
+      approvedBy: 'approved_by',
+      approvalNotes: 'approval_notes',
+      submittedAt: 'submitted_at',
+      submittedBy: 'submitted_by',
+      submitterRole: 'submitter_role',
+      teamLeadApprovedBy: 'team_lead_approved_by',
+      teamLeadApprovedAt: 'team_lead_approved_at',
+      pmApprovedBy: 'pm_approved_by',
+      pmApprovedAt: 'pm_approved_at',
+      superadminApprovedBy: 'superadmin_approved_by',
+      superadminApprovedAt: 'superadmin_approved_at',
     };
 
     Object.keys(updateData).forEach(key => {
@@ -440,6 +536,23 @@ class Task {
       actualHours: row.actual_hours ? parseFloat(row.actual_hours) : null,
       dependencies: row.dependencies ? JSON.parse(row.dependencies) : [],
       tags: row.tags ? JSON.parse(row.tags) : [],
+      attachmentData: row.attachment_data || null,
+      attachmentName: row.attachment_name || null,
+      attachmentType: row.attachment_type || null,
+      attachmentSize: row.attachment_size || null,
+      approvalStatus: row.approval_status || 'not_required',
+      approvalStage: row.approval_stage || 'none',
+      approvedBy: row.approved_by || null,
+      approvalNotes: row.approval_notes || null,
+      submittedAt: row.submitted_at || null,
+      submittedBy: row.submitted_by || null,
+      submitterRole: row.submitter_role || null,
+      teamLeadApprovedBy: row.team_lead_approved_by || null,
+      teamLeadApprovedAt: row.team_lead_approved_at || null,
+      pmApprovedBy: row.pm_approved_by || null,
+      pmApprovedAt: row.pm_approved_at || null,
+      superadminApprovedBy: row.superadmin_approved_by || null,
+      superadminApprovedAt: row.superadmin_approved_at || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

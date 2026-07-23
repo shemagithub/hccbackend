@@ -3,7 +3,10 @@ import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
-import { testConnection, ensureDatabase } from "./config/db.js";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { testConnection, pingDatabase, ensureDatabase } from "./config/db.js";
 import departmentRoutes from "./routes/departmentRoutes.js";
 import roleRoutes from "./routes/roleRoutes.js";
 import staffRoutes from "./routes/staffRoutes.js";
@@ -45,6 +48,8 @@ import projectSupportLogRoutes from "./routes/projectSupportLogRoutes.js";
 import skillRoutes from "./routes/skillRoutes.js";
 import skillProfileRoutes from "./routes/skillProfileRoutes.js";
 import projectAssignmentRoutes from "./routes/projectAssignmentRoutes.js";
+import projectTeamRoutes from "./routes/projectTeamRoutes.js";
+import projectManagerRoutes from "./routes/projectManagerRoutes.js";
 import availabilityRoutes from "./routes/availabilityRoutes.js";
 import skillGapRoutes from "./routes/skillGapRoutes.js";
 import trainingRoutes from "./routes/trainingRoutes.js";
@@ -61,15 +66,103 @@ import supportTicketRoutes from "./routes/supportTicketRoutes.js";
 import userPermissionRoutes from "./routes/userPermissionRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import financeProjectRoutes from "./routes/financeProjectRoutes.js";
+import financeRoutes from "./routes/financeRoutes.js";
 import contractRoutes from "./routes/contractRoutes.js";
 import superadminRoutes from "./routes/superadminRoutes.js";
 import teamActivityRoutes from "./routes/teamActivityRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import receptionRoutes from "./routes/receptionRoutes.js";
-import { initializeDatabaseSchema } from "./scripts/init-database-schema.js";
 
 dotenv.config();
 const app = express();
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+const resolveFrontendDist = () => {
+  const candidates = [
+    process.env.FRONTEND_DIST_PATH,
+    path.join(moduleDir, "public"),
+    path.join(moduleDir, "../hcc/dist"),
+    path.join(moduleDir, "../public_html"),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    if (fs.existsSync(path.join(resolved, "index.html"))) {
+      return resolved;
+    }
+  }
+  return null;
+};
+
+const frontendDist = resolveFrontendDist();
+if (frontendDist) {
+  console.log(`🖥️  Serving frontend from: ${frontendDist}`);
+} else {
+  console.log("ℹ️  No frontend build found — API-only mode (copy hcc/dist into hccbackend/public/)");
+}
+
+const isPassengerRuntime =
+  typeof PhusionPassenger !== "undefined" || Boolean(process.env.PASSENGER_APP_ENV);
+const isProduction = process.env.NODE_ENV === 'production';
+// Schema: auto-import SQL dump when DB is empty (local dev). Set RUN_SCHEMA_INIT=true on production.
+const shouldAutoSchema =
+  process.env.RUN_SCHEMA_INIT === 'true' ||
+  (!isPassengerRuntime && !isProduction);
+const skipEnsureDatabase =
+  isPassengerRuntime ||
+  isProduction ||
+  process.env.SKIP_ENSURE_DATABASE === 'true';
+
+let bootstrapComplete = false;
+let bootstrapPromise = null;
+
+const bootstrapDatabase = async () => {
+  try {
+    if (!skipEnsureDatabase) {
+      await ensureDatabase();
+    }
+
+    // Fast ping on deployed runtimes; full test only for local dev startup
+    const dbConnected =
+      isPassengerRuntime || isProduction
+        ? await pingDatabase()
+        : await testConnection(1, 1000);
+
+    if (dbConnected && shouldAutoSchema) {
+      const { ensureSchemaFromSql } = await import("./scripts/import-sql-schema.js");
+      await ensureSchemaFromSql();
+    } else if (dbConnected && process.env.RUN_SCHEMA_INIT === 'js') {
+      const { initializeDatabaseSchema } = await import("./scripts/init-database-schema.js");
+      await initializeDatabaseSchema();
+    } else if (dbConnected) {
+      console.log('✅ Database reachable (schema import skipped on this runtime)');
+    }
+
+    if (dbConnected) {
+      const { runSchemaMigrations } = await import("./utils/runSchemaMigrations.js");
+      await runSchemaMigrations();
+      console.log('✅ Schema migrations applied');
+    } else {
+      console.error("\n❌ Failed to connect to database.");
+      console.error("   Check DB_HOST, DB_USER, DB_PASSWORD, DB_NAME in .env\n");
+    }
+  } catch (error) {
+    console.error("❌ Database bootstrap failed:", error.message);
+  } finally {
+    bootstrapComplete = true;
+  }
+};
+
+const ensureBootstrap = () => {
+  if (!bootstrapPromise) {
+    bootstrapPromise = bootstrapDatabase();
+  }
+  return bootstrapPromise;
+};
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
 
 // Middleware
 // Increase body size limit to 350MB to handle 200MB files with Base64 encoding overhead
@@ -213,6 +306,10 @@ app.use('/api/skill-profiles', skillProfileRoutes);
 console.log('✅ Skill profile routes registered at /api/skill-profiles');
 app.use('/api/project-assignments', projectAssignmentRoutes);
 console.log('✅ Project assignment routes registered at /api/project-assignments');
+app.use('/api/project-team', projectTeamRoutes);
+console.log('✅ Project team routes registered at /api/project-team');
+app.use('/api/project-manager', projectManagerRoutes);
+console.log('✅ Project manager routes registered at /api/project-manager');
 app.use('/api/availability', availabilityRoutes);
 console.log('✅ Availability routes registered at /api/availability');
 app.use('/api/skill-gaps', skillGapRoutes);
@@ -246,6 +343,8 @@ app.use('/api/notifications', notificationRoutes);
 console.log('✅ Notification routes registered at /api/notifications');
 app.use('/api/finance-project', financeProjectRoutes);
 console.log('✅ Finance project routes registered at /api/finance-project');
+app.use('/api/finance', financeRoutes);
+console.log('✅ Finance control panel routes registered at /api/finance');
 app.use('/api/superadmin', superadminRoutes);
 console.log('✅ SuperAdmin routes registered at /api/superadmin');
 app.use('/api/team-activity', teamActivityRoutes);
@@ -256,76 +355,74 @@ app.use('/api/reception', receptionRoutes);
 console.log('✅ Reception desk routes registered at /api/reception');
 console.log('✅ Leave request routes registered at /api/leave-requests');
 
-// Basic routes
-app.get('/', (req, res) => {
-  res.json({
-    message: 'HCC Backend API is running!',
-    timestamp: new Date().toISOString(),
-    database: 'hcc',
-      endpoints: {
-      departments: '/api/departments',
-      roles: '/api/roles',
-      staff: '/api/staff',
-      messages: '/api/messages',
-      opportunities: '/api/opportunities',
-      projects: '/api/projects',
-      clients: '/api/clients',
-      vehicles: '/api/vehicles',
-      tasks: '/api/tasks',
-      documents: '/api/documents',
-      discussions: '/api/discussions',
-      implementations: '/api/implementations',
-      eois: '/api/eois',
-      budgets: '/api/budgets',
-      invoices: '/api/invoices',
-      expenses: '/api/expenses',
-      deliverables: '/api/deliverables',
-      meetings: '/api/meetings',
-      clientBillings: '/api/client-billings',
-      vendorPayments: '/api/vendor-payments',
-      supplierInvoices: '/api/supplier-invoices',
-      salaryPayments: '/api/salary-payments',
-      deductions: '/api/deductions',
-      bonuses: '/api/bonuses',
-      taxes: '/api/taxes',
-      milestones: '/api/milestones',
-      trips: '/api/trips',
-      tripReports: '/api/trip-reports',
-      fuelLogs: '/api/fuel-logs',
-      vehicleInspections: '/api/vehicle-inspections',
-      maintenance: '/api/maintenance',
-      timeAttendance: '/api/time-attendance',
-      projectSupportLogs: '/api/project-support-logs',
-      skills: '/api/skills',
-      skillProfiles: '/api/skill-profiles',
-      projectAssignments: '/api/project-assignments',
-      availability: '/api/availability',
-      skillGaps: '/api/skill-gaps',
-      training: '/api/training',
-      performance: '/api/performance',
-      workReports: '/api/work-reports',
-      fieldReports: '/api/field-reports',
-      employeeRequests: '/api/employee-requests',
-      leaveRequests: '/api/leave-requests',
-      supportTickets: '/api/support-tickets',
-      userPermissions: '/api/user-permissions',
-      reviews: '/api/reviews',
-      quality: '/api/quality',
-      risks: '/api/risks',
-      team: '/api/team',
-      health: '/health'
-    }
-  });
+const apiInfoPayload = () => ({
+  message: 'HCC Backend API is running!',
+  ready: bootstrapComplete,
+  timestamp: new Date().toISOString(),
+  database: 'hcc',
+  endpoints: {
+    departments: '/api/departments',
+    roles: '/api/roles',
+    staff: '/api/staff',
+    messages: '/api/messages',
+    opportunities: '/api/opportunities',
+    projects: '/api/projects',
+    clients: '/api/clients',
+    vehicles: '/api/vehicles',
+    tasks: '/api/tasks',
+    documents: '/api/documents',
+    discussions: '/api/discussions',
+    implementations: '/api/implementations',
+    eois: '/api/eois',
+    budgets: '/api/budgets',
+    invoices: '/api/invoices',
+    expenses: '/api/expenses',
+    deliverables: '/api/deliverables',
+    meetings: '/api/meetings',
+    clientBillings: '/api/client-billings',
+    vendorPayments: '/api/vendor-payments',
+    supplierInvoices: '/api/supplier-invoices',
+    salaryPayments: '/api/salary-payments',
+    deductions: '/api/deductions',
+    bonuses: '/api/bonuses',
+    taxes: '/api/taxes',
+    milestones: '/api/milestones',
+    trips: '/api/trips',
+    tripReports: '/api/trip-reports',
+    fuelLogs: '/api/fuel-logs',
+    vehicleInspections: '/api/vehicle-inspections',
+    maintenance: '/api/maintenance',
+    timeAttendance: '/api/time-attendance',
+    projectSupportLogs: '/api/project-support-logs',
+    skills: '/api/skills',
+    skillProfiles: '/api/skill-profiles',
+    projectAssignments: '/api/project-assignments',
+    availability: '/api/availability',
+    skillGaps: '/api/skill-gaps',
+    training: '/api/training',
+    performance: '/api/performance',
+    workReports: '/api/work-reports',
+    fieldReports: '/api/field-reports',
+    employeeRequests: '/api/employee-requests',
+    leaveRequests: '/api/leave-requests',
+    supportTickets: '/api/support-tickets',
+    userPermissions: '/api/user-permissions',
+    reviews: '/api/reviews',
+    quality: '/api/quality',
+    risks: '/api/risks',
+    team: '/api/team',
+    health: '/health',
+  },
 });
 
 app.get('/health', async (req, res) => {
   try {
-    const dbConnected = await testConnection();
+    const dbConnected = await pingDatabase();
     res.json({
-      status: 'ok',
+      status: dbConnected ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
       database: dbConnected ? 'connected' : 'disconnected',
-      message: 'HCC Backend is healthy'
+      message: dbConnected ? 'HCC Backend is healthy' : 'Database unreachable',
     });
   } catch (error) {
     res.status(500).json({
@@ -336,22 +433,68 @@ app.get('/health', async (req, res) => {
   }
 });
 
+if (frontendDist) {
+  app.use(express.static(frontendDist, { index: false, maxAge: '1d' }));
+
+  app.get('/favicon.ico', (req, res) => {
+    const iconCandidates = [
+      path.join(frontendDist, 'favicon.ico'),
+      path.join(frontendDist, 'assets/hcc-logo.png'),
+    ];
+    const iconPath = iconCandidates.find((candidate) => fs.existsSync(candidate));
+    if (iconPath) {
+      return res.sendFile(iconPath);
+    }
+    res.status(204).end();
+  });
+
+  app.get('/api', (req, res) => {
+    res.json(apiInfoPayload());
+  });
+
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path === '/health') {
+      return next();
+    }
+    res.sendFile(path.join(frontendDist, 'index.html'), (error) => {
+      if (error) {
+        next(error);
+      }
+    });
+  });
+} else {
+  app.get('/', (req, res) => {
+    res.json(apiInfoPayload());
+  });
+}
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ success: false, message: 'API route not found' });
+});
+
+// Global error handler — prevents unhandled errors from crashing Passenger workers
+app.use((err, req, res, next) => {
+  console.error(`[ERROR] ${req.method} ${req.originalUrl}:`, err.message);
+  if (res.headersSent) {
+    return next(err);
+  }
+  res.status(err.status || 500).json({
+    success: false,
+    message: process.env.NODE_ENV === 'production'
+      ? 'Internal server error'
+      : err.message,
+  });
+});
+
 const PORT = process.env.PORT || 5000;
 const API_BASE_URL = process.env.API_BASE_URL || `https://hcc.guzekustomz.com`;
-console.log('Starting server on port:', PORT);
+
+const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 
 // Start server
 const startServer = async () => {
   try {
-    await ensureDatabase();
-    const dbConnected = await testConnection();
-
-    if (dbConnected) {
-      await initializeDatabaseSchema();
-    } else {
-      console.error('\n❌ Failed to connect to database.');
-      console.error('   The API server will still start, but endpoints may fail until MySQL is reachable.\n');
-    }
+    await ensureBootstrap();
 
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
@@ -373,9 +516,16 @@ const startServer = async () => {
       console.log(`📄 Invoices API: ${API_BASE_URL}/api/invoices`);
     });
   } catch (error) {
-    console.error('❌ Server startup failed:', error.message);
+    console.error("❌ Server startup failed:", error.message);
     process.exit(1);
   }
 };
 
-startServer();
+export { app, startServer };
+
+if (isPassengerRuntime) {
+  void ensureBootstrap();
+} else if (isMainModule) {
+  console.log("Starting server on port:", PORT);
+  void startServer();
+}

@@ -1,15 +1,126 @@
 import Opportunity from '../models/Opportunity.js';
 import OpportunityProposal from '../models/OpportunityProposal.js';
 import Implementation from '../models/Implementation.js';
+import Contract from '../models/Contract.js';
 import Staff from '../models/Staff.js';
+import EOI from '../models/EOI.js';
+import pool from '../config/db.js';
+import {
+  DEFAULT_OPPORTUNITY_DECISION,
+  DEFAULT_OPPORTUNITY_URGENCY,
+  isValidOpportunityDecision,
+  isValidOpportunityUrgency,
+  normalizeBase64Document,
+  validateBase64DocumentSize,
+} from '../constants/opportunityOptions.js';
+import { syncGoEOIsToProposals } from '../utils/opportunityPipeline.js';
+import { isSuperAdminRole } from '../utils/rolePermissions.js';
 
-const VALID_PROPOSAL_DECISIONS = ['pending', 'under_review', 'awarded', 'rejected', 'cancelled'];
+function addDaysFromDate(baseDate, days) {
+  const date = baseDate ? new Date(baseDate) : new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().split('T')[0];
+}
 
-function validateProposalAwardedDecision(data) {
-  if (data.decision !== 'awarded') return null;
+function buildEOIPayloadFromOpportunity(opportunity) {
+  const today = new Date().toISOString().split('T')[0];
+  const requirements = [];
+
+  if (opportunity.comment) {
+    requirements.push(opportunity.comment);
+  }
+  if (opportunity.fundAgency) {
+    requirements.push(`Fund agency: ${opportunity.fundAgency}`);
+  }
+  if (opportunity.legalEntity) {
+    requirements.push(`Legal entity: ${opportunity.legalEntity}`);
+  }
+
+  return {
+    title: opportunity.name,
+    organization: opportunity.client,
+    submissionDate: opportunity.operationDate || today,
+    deadline:
+      opportunity.feedbackDeadline ||
+      opportunity.expectedCloseDate ||
+      addDaysFromDate(today, 30),
+    status: 'draft',
+    value: opportunity.value || 0,
+    assignedTo: opportunity.assignedTo || null,
+    description:
+      opportunity.description ||
+      `Expression of interest for ${opportunity.name} (${opportunity.client}).`,
+    requirements,
+  };
+}
+
+function buildOpportunitySummary(opportunity) {
+  return {
+    opportunityId: opportunity.id,
+    dbId: opportunity.dbId,
+    name: opportunity.name,
+    client: opportunity.client,
+    department: opportunity.department,
+    country: opportunity.country,
+    legalEntity: opportunity.legalEntity,
+    contact: opportunity.contact,
+    value: opportunity.value,
+    bidCurrency: opportunity.bidCurrency,
+    fundAgency: opportunity.fundAgency,
+    description: opportunity.description,
+    comment: opportunity.comment,
+    feedbackDeadline: opportunity.feedbackDeadline,
+    expectedCloseDate: opportunity.expectedCloseDate,
+    operationDate: opportunity.operationDate,
+    winProbability: opportunity.winProbability,
+    urgency: opportunity.urgency,
+    decision: opportunity.decision,
+    assignedTo: opportunity.assignedTo,
+    year: opportunity.year,
+  };
+}
+
+function buildProposalSeedFromOpportunity(opportunity) {
+  const summary = buildOpportunitySummary(opportunity);
+
+  return {
+    technicalProposal: JSON.stringify(
+      {
+        opportunity: summary,
+        technicalApproach: opportunity.description || '',
+        scopeNotes: opportunity.comment || '',
+      },
+      null,
+      2
+    ),
+    financialProposal: JSON.stringify(
+      {
+        opportunity: summary,
+        estimatedValue: opportunity.value || 0,
+        currency: opportunity.bidCurrency || 'USD',
+        fundAgency: opportunity.fundAgency || null,
+      },
+      null,
+      2
+    ),
+    technicalStatus: 'draft',
+    financialStatus: 'draft',
+    decision: 'pending',
+  };
+}
+
+function validateProposalWonDecision(data, statuses = {}) {
+  if (data.decision !== 'won') return null;
+
+  const technicalStatus = statuses.technicalStatus ?? 'draft';
+  const financialStatus = statuses.financialStatus ?? 'draft';
+
+  if (technicalStatus !== 'approved' || financialStatus !== 'approved') {
+    return 'Technical and financial proposals must be approved before decision can be Won';
+  }
 
   if (!data.implementationStartDate || !data.implementationDueDate) {
-    return 'Start date and due date are required when decision is Awarded';
+    return 'Start date and due date are required when decision is Won';
   }
 
   if (new Date(data.implementationStartDate) > new Date(data.implementationDueDate)) {
@@ -18,7 +129,8 @@ function validateProposalAwardedDecision(data) {
 
   return null;
 }
-import pool from '../config/db.js';
+
+const VALID_PROPOSAL_DECISIONS = ['pending', 'under_review', 'won', 'rejected', 'cancelled'];
 
 export class OpportunityController {
   // Create a new opportunity
@@ -39,12 +151,12 @@ export class OpportunityController {
         winProbabilityDocument,
         bidCurrency,
         fundAgency,
-        urgency = 'medium',
+        urgency = DEFAULT_OPPORTUNITY_URGENCY,
         supportingDocument,
         comment,
         year,
         status = 'open',
-        decision = 'pending',
+        decision = DEFAULT_OPPORTUNITY_DECISION,
         value = 0,
         expectedCloseDate,
         assignedTo
@@ -74,15 +186,14 @@ export class OpportunityController {
         });
       }
 
-      // Validate urgency
-      if (!['low', 'medium', 'high', 'critical'].includes(urgency)) {
+      if (!isValidOpportunityUrgency(urgency)) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid urgency value. Must be: low, medium, high, or critical'
+          message: 'Invalid urgency value. Must be: not_urgent, urgent, very_urgent, or past_due'
         });
       }
 
-      // Validate status
+      // Validate status (kept for pipeline stats; defaults to open)
       if (!['open', 'qualified', 'proposal', 'won', 'lost'].includes(status)) {
         return res.status(400).json({
           success: false,
@@ -90,11 +201,10 @@ export class OpportunityController {
         });
       }
 
-      // Validate decision
-      if (!['pending', 'approved', 'rejected', 'under_review', 'cancelled'].includes(decision)) {
+      if (!isValidOpportunityDecision(decision)) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid decision value. Must be: pending, approved, rejected, under_review, or cancelled'
+          message: 'Invalid decision value. Must be: submitted, under_preparation, internal_review, overdue, or failed'
         });
       }
 
@@ -170,12 +280,12 @@ export class OpportunityController {
         winProbabilityDocument: (winProbabilityDocument && String(winProbabilityDocument).trim()) || null,
         bidCurrency: (bidCurrency && String(bidCurrency).trim()) || '',
         fundAgency: (fundAgency && String(fundAgency).trim()) || null,
-        urgency: (urgency && String(urgency).trim()) || 'medium',
+        urgency: (urgency && String(urgency).trim()) || DEFAULT_OPPORTUNITY_URGENCY,
         supportingDocument: (supportingDocument && String(supportingDocument).trim()) || null,
         comment: (comment && String(comment).trim()) || null,
         year: (year && String(year).trim()) || String(new Date().getFullYear()),
         status: (status && String(status).trim()) || 'open',
-        decision: (decision && String(decision).trim()) || 'pending',
+        decision: (decision && String(decision).trim()) || DEFAULT_OPPORTUNITY_DECISION,
         value: parseFloat(value) || 0,
         expectedCloseDate: (expectedCloseDate && String(expectedCloseDate).trim()) || null,
         assignedTo: (assignedTo && String(assignedTo).trim()) || null
@@ -220,6 +330,100 @@ export class OpportunityController {
     }
   }
 
+  static async resolveOpportunityListAccess(req, query = {}) {
+    const { department, includeAll = false } = query;
+    const shouldIncludeAll =
+      includeAll === 'true' || includeAll === true || includeAll === '1';
+
+    let userEmail = null;
+    let isSuperAdmin = false;
+    let departmentFilter = department;
+
+    if (req.staffId) {
+      try {
+        const staff = await Staff.findById(req.staffId);
+        if (staff) {
+          const userRole = staff.role?.toLowerCase() || '';
+          if (userRole === 'superadmin' || userRole === 'finance') {
+            isSuperAdmin = true;
+            userEmail = null;
+          } else if (!shouldIncludeAll && staff.email) {
+            userEmail = staff.email;
+          }
+
+          if (!departmentFilter && !isSuperAdmin && staff.departmentId) {
+            const [deptRows] = await pool.execute('SELECT name FROM departments WHERE id = ?', [
+              staff.departmentId,
+            ]);
+            if (deptRows.length > 0) {
+              departmentFilter = deptRows[0].name;
+            }
+          }
+        }
+      } catch (staffError) {
+        console.error('Error fetching staff info:', staffError);
+      }
+    }
+
+    return { userEmail, isSuperAdmin, departmentFilter, shouldIncludeAll };
+  }
+
+  // List opportunities with saved proposal records (proposal stage pipeline)
+  static async getOpportunityProposals(req, res) {
+    try {
+      const { search, page = 1, limit = 50, includeAll = false } = req.query;
+      const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+      const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+
+      const { userEmail, isSuperAdmin, departmentFilter } =
+        await OpportunityController.resolveOpportunityListAccess(req, {
+          includeAll,
+        });
+
+      await OpportunityProposal.ensureTable();
+      await EOI.ensureGoDecisionField();
+      await EOI.ensureOpportunityLink();
+
+      const filters = {
+        search,
+        department: departmentFilter,
+        userEmail,
+        limit: parsedLimit,
+        offset: (parsedPage - 1) * parsedLimit,
+      };
+
+      const items = await OpportunityProposal.findAllWithOpportunities(filters);
+      const stats = await Opportunity.getStats(isSuperAdmin ? null : userEmail);
+
+      res.json({
+        success: true,
+        data: items,
+        pagination: {
+          page: parsedPage,
+          limit: parsedLimit,
+          total: stats.total,
+        },
+        stats: {
+          total: stats.total,
+          totalValue: parseFloat(stats.totalValue || 0),
+          weightedValue: parseFloat(stats.weightedValue || 0),
+          open: stats.open,
+          qualified: stats.qualified,
+          proposal: stats.proposal,
+          won: stats.won,
+          lost: stats.lost,
+        },
+      });
+    } catch (error) {
+      console.error('Get opportunity proposals error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch proposals',
+        error: error.message,
+      });
+    }
+  }
+
   // Get all opportunities
   static async getOpportunities(req, res) {
     try {
@@ -233,10 +437,16 @@ export class OpportunityController {
         page = 1,
         limit = 10,
         includeAll = false,
+        forDiscussion = false,
         pipelineStage
       } = req.query;
 
-      const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+      const shouldIncludeAll = includeAll === 'true' || includeAll === true || includeAll === '1';
+      const isDiscussionView = forDiscussion === 'true' || forDiscussion === true || forDiscussion === '1';
+
+      const parsedLimit = isDiscussionView
+        ? Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500)
+        : Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
       const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
 
       // Get the logged-in user's email from staff ID
@@ -247,24 +457,32 @@ export class OpportunityController {
       let departmentFilter = department;
       
       // Check includeAll - it comes as a string from query params, so we need to check both string and boolean
-      const shouldIncludeAll = includeAll === 'true' || includeAll === true || includeAll === '1';
       
       if (req.staffId) {
         try {
           const staff = await Staff.findById(req.staffId);
           if (staff) {
-            // Check if user is SuperAdmin or Finance - always give full access
             const userRole = staff.role?.toLowerCase() || '';
-            if (userRole === 'superadmin' || userRole === 'finance') {
-              isSuperAdmin = true;
+            isSuperAdmin = isSuperAdminRole(staff.role);
+
+            if (isSuperAdmin || userRole === 'finance') {
               userEmail = null; // SuperAdmin and Finance get all opportunities
               console.log(`📋 getOpportunities - ${staff.role} user detected, granting full access`);
+            } else if (isDiscussionView) {
+              // Discussion: show assigned opportunities across all portals/departments
+              userEmail = staff.email || null;
             } else if (!shouldIncludeAll && staff.email) {
               // Regular users: filter by their email unless includeAll is true
               userEmail = staff.email;
             }
 
-            if (!departmentFilter && !isSuperAdmin && staff.departmentId) {
+            if (
+              !departmentFilter &&
+              !isSuperAdmin &&
+              !shouldIncludeAll &&
+              !isDiscussionView &&
+              staff.departmentId
+            ) {
               const [deptRows] = await pool.execute('SELECT name FROM departments WHERE id = ?', [staff.departmentId]);
               if (deptRows.length > 0) {
                 departmentFilter = deptRows[0].name;
@@ -277,7 +495,7 @@ export class OpportunityController {
         }
       }
       
-      console.log('📋 getOpportunities - includeAll:', includeAll, 'shouldIncludeAll:', shouldIncludeAll, 'isSuperAdmin:', isSuperAdmin, 'userEmail:', userEmail);
+      console.log('📋 getOpportunities - includeAll:', includeAll, 'forDiscussion:', forDiscussion, 'shouldIncludeAll:', shouldIncludeAll, 'isSuperAdmin:', isSuperAdmin, 'userEmail:', userEmail);
 
       const filters = {
         search,
@@ -294,9 +512,16 @@ export class OpportunityController {
 
       if (pipelineStage === 'proposals') {
         await OpportunityProposal.ensureTable();
+        await EOI.ensureGoDecisionField();
       }
 
-      const opportunities = await Opportunity.findAll(filters);
+      await EOI.ensureOpportunityLink();
+      await OpportunityProposal.ensureTable();
+
+      const opportunities =
+        pipelineStage === 'proposals'
+          ? await OpportunityProposal.findAllWithOpportunities(filters)
+          : await Opportunity.findAll(filters);
       // For stats, also use null for SuperAdmin to get all stats
       const stats = await Opportunity.getStats(isSuperAdmin ? null : userEmail);
 
@@ -439,10 +664,10 @@ export class OpportunityController {
       }
 
       // Validate urgency if provided
-      if (updateData.urgency !== undefined && !['low', 'medium', 'high', 'critical'].includes(updateData.urgency)) {
+      if (updateData.urgency !== undefined && !isValidOpportunityUrgency(updateData.urgency)) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid urgency value. Must be: low, medium, high, or critical'
+          message: 'Invalid urgency value. Must be: not_urgent, urgent, very_urgent, or past_due'
         });
       }
 
@@ -454,11 +679,10 @@ export class OpportunityController {
         });
       }
 
-      // Validate decision if provided
-      if (updateData.decision !== undefined && !['pending', 'approved', 'rejected', 'under_review', 'cancelled'].includes(updateData.decision)) {
+      if (updateData.decision !== undefined && !isValidOpportunityDecision(updateData.decision)) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid decision value. Must be: pending, approved, rejected, under_review, or cancelled'
+          message: 'Invalid decision value. Must be: submitted, under_preparation, internal_review, overdue, or failed'
         });
       }
 
@@ -670,9 +894,108 @@ export class OpportunityController {
     }
   }
 
-  static async getOpportunityProposal(req, res) {
+  static async ensureOpportunityEOI(req, res) {
+    try {
+      await EOI.ensureOpportunityLink();
+      const { id } = req.params;
+      const opportunity = await OpportunityProposal.resolveOpportunity(id);
+
+      if (!opportunity) {
+        return res.status(404).json({
+          success: false,
+          message: 'Opportunity not found',
+        });
+      }
+
+      let eoi = await EOI.findByOpportunityDbId(opportunity.dbId);
+      let created = false;
+
+      if (!eoi) {
+        const payload = buildEOIPayloadFromOpportunity(opportunity);
+        eoi = await EOI.create({
+          ...payload,
+          opportunityId: opportunity.dbId,
+        });
+        created = true;
+      }
+
+      if (opportunity.status !== 'qualified' && opportunity.status !== 'proposal') {
+        await Opportunity.update(opportunity.dbId, { status: 'qualified' });
+        opportunity.status = 'qualified';
+      }
+
+      res.status(created ? 201 : 200).json({
+        success: true,
+        message: created
+          ? 'Expression of interest created from opportunity'
+          : 'Expression of interest already exists for this opportunity',
+        data: {
+          eoi,
+          opportunity,
+          created,
+        },
+      });
+    } catch (error) {
+      console.error('Ensure opportunity EOI error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to create expression of interest from opportunity',
+        error: error.message,
+      });
+    }
+  }
+
+  static async ensureOpportunityProposal(req, res) {
     try {
       await OpportunityProposal.ensureTable();
+      const { id } = req.params;
+      const opportunity = await OpportunityProposal.resolveOpportunity(id);
+
+      if (!opportunity) {
+        return res.status(404).json({
+          success: false,
+          message: 'Opportunity not found',
+        });
+      }
+
+      let proposal = await OpportunityProposal.findByOpportunityDbId(opportunity.dbId);
+      let created = false;
+
+      if (!proposal) {
+        const seed = buildProposalSeedFromOpportunity(opportunity);
+        proposal = await OpportunityProposal.upsert(opportunity.dbId, seed);
+        created = true;
+      }
+
+      if (opportunity.status !== 'proposal') {
+        await Opportunity.update(opportunity.dbId, { status: 'proposal' });
+        opportunity.status = 'proposal';
+      }
+
+      res.status(created ? 201 : 200).json({
+        success: true,
+        message: created
+          ? 'Proposal created from opportunity'
+          : 'Proposal already exists for this opportunity',
+        data: {
+          proposal,
+          opportunity,
+          created,
+        },
+      });
+    } catch (error) {
+      console.error('Ensure opportunity proposal error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to create proposal from opportunity',
+        error: error.message,
+      });
+    }
+  }
+
+  static async getOpportunityProposal(req, res) {
+    try {
+      await OpportunityProposal.ensureAttachmentFields();
       const { id } = req.params;
       const opportunity = await OpportunityProposal.resolveOpportunity(id);
 
@@ -696,11 +1019,16 @@ export class OpportunityController {
           implementationId: null,
         };
 
+      const contract = await Contract.findByOpportunityId(opportunity.dbId, {
+        excludeDocuments: true,
+      });
+
       res.json({
         success: true,
         data: {
           ...proposal,
           opportunity,
+          contract,
         },
       });
     } catch (error) {
@@ -715,7 +1043,7 @@ export class OpportunityController {
 
   static async upsertOpportunityProposal(req, res) {
     try {
-      await OpportunityProposal.ensureTable();
+      await OpportunityProposal.ensureAttachmentFields();
       const { id } = req.params;
       const {
         technicalProposal,
@@ -725,6 +1053,10 @@ export class OpportunityController {
         decision,
         implementationStartDate,
         implementationDueDate,
+        technicalAttachment,
+        technicalAttachmentName,
+        financialAttachment,
+        financialAttachmentName,
       } = req.body;
 
       const opportunity = await OpportunityProposal.resolveOpportunity(id);
@@ -758,6 +1090,10 @@ export class OpportunityController {
       }
 
       const existingProposal = await OpportunityProposal.findByOpportunityDbId(opportunity.dbId);
+      const mergedStatuses = {
+        technicalStatus: technicalStatus ?? existingProposal?.technicalStatus ?? 'draft',
+        financialStatus: financialStatus ?? existingProposal?.financialStatus ?? 'draft',
+      };
       const mergedDecisionData = {
         decision: decision ?? existingProposal?.decision ?? 'pending',
         implementationStartDate:
@@ -765,9 +1101,26 @@ export class OpportunityController {
         implementationDueDate:
           implementationDueDate ?? existingProposal?.implementationDueDate ?? null,
       };
-      const awardedError = validateProposalAwardedDecision(mergedDecisionData);
-      if (awardedError) {
-        return res.status(400).json({ success: false, message: awardedError });
+      const wonError = validateProposalWonDecision(mergedDecisionData, mergedStatuses);
+      if (wonError) {
+        return res.status(400).json({ success: false, message: wonError });
+      }
+
+      const normalizedTechnicalAttachment = normalizeBase64Document(technicalAttachment);
+      const normalizedFinancialAttachment = normalizeBase64Document(financialAttachment);
+      const technicalAttachmentError = validateBase64DocumentSize(
+        normalizedTechnicalAttachment,
+        'Technical attachment'
+      );
+      if (technicalAttachmentError) {
+        return res.status(400).json({ success: false, message: technicalAttachmentError });
+      }
+      const financialAttachmentError = validateBase64DocumentSize(
+        normalizedFinancialAttachment,
+        'Financial attachment'
+      );
+      if (financialAttachmentError) {
+        return res.status(400).json({ success: false, message: financialAttachmentError });
       }
 
       const proposal = await OpportunityProposal.upsert(opportunity.dbId, {
@@ -778,14 +1131,40 @@ export class OpportunityController {
         decision,
         implementationStartDate,
         implementationDueDate,
+        technicalAttachment: technicalAttachment !== undefined ? normalizedTechnicalAttachment : undefined,
+        technicalAttachmentName,
+        financialAttachment: financialAttachment !== undefined ? normalizedFinancialAttachment : undefined,
+        financialAttachmentName,
       });
+
+      let contract = null;
+      if (mergedDecisionData.decision === 'won') {
+        const staff = req.staffId ? await Staff.findById(req.staffId) : null;
+        const staffName = staff ? `${staff.firstName} ${staff.lastName}` : 'System';
+        let linkedProjectId = null;
+        if (proposal.implementationId) {
+          const existingImpl = await Implementation.findById(proposal.implementationId);
+          linkedProjectId = existingImpl?.projectId || null;
+        }
+        contract = await Contract.createFromWonProposal({
+          opportunity,
+          proposal,
+          projectId: linkedProjectId,
+          createdBy: req.staffId || null,
+          createdByName: staffName,
+        });
+      }
 
       res.json({
         success: true,
-        message: 'Proposal saved successfully',
+        message:
+          mergedDecisionData.decision === 'won'
+            ? 'Proposal saved and contract created in Contract Management'
+            : 'Proposal saved successfully',
         data: {
           ...proposal,
           opportunity,
+          contract,
         },
       });
     } catch (error) {
@@ -820,27 +1199,27 @@ export class OpportunityController {
 
       if (!proposal) {
         if (
-          bodyDecision === 'awarded' &&
+          bodyDecision === 'won' &&
           bodyStartDate &&
           bodyDueDate
         ) {
           proposal = await OpportunityProposal.upsert(opportunity.dbId, {
-            decision: 'awarded',
+            decision: 'won',
             implementationStartDate: bodyStartDate,
             implementationDueDate: bodyDueDate,
           });
         } else {
           return res.status(400).json({
             success: false,
-            message: 'Save proposal decision with awarded dates before starting implementation',
+            message: 'Save proposal decision with Won dates before starting implementation',
           });
         }
       }
 
-      if (proposal.decision !== 'awarded') {
+      if (proposal.decision !== 'won') {
         return res.status(400).json({
           success: false,
-          message: 'Implementation can only be started when the proposal decision is Awarded',
+          message: 'Implementation can only be started when the proposal decision is Won',
         });
       }
 
@@ -901,13 +1280,24 @@ export class OpportunityController {
         decision: 'approved',
       });
 
+      const staff = req.staffId ? await Staff.findById(req.staffId) : null;
+      const staffName = staff ? `${staff.firstName} ${staff.lastName}` : 'System';
+      const contract = await Contract.createFromWonProposal({
+        opportunity,
+        proposal: updatedProposal,
+        projectId: implementation.projectId || implementation.projectDbId || null,
+        createdBy: req.staffId || null,
+        createdByName: staffName,
+      });
+
       res.status(201).json({
         success: true,
-        message: 'Implementation started successfully',
+        message: 'Implementation started and contract linked successfully',
         data: {
           proposal: updatedProposal,
           opportunity: await Opportunity.findById(opportunity.dbId, { excludeDocuments: true }),
           implementation,
+          contract,
         },
       });
     } catch (error) {

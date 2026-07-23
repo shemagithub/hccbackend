@@ -8,7 +8,10 @@ const router = express.Router();
 // This ensures all signed-in users can access opportunities
 router.post('/', authenticate, OpportunityController.createOpportunity);
 router.get('/', authenticate, OpportunityController.getOpportunities);
+router.get('/proposals/list', authenticate, OpportunityController.getOpportunityProposals);
 router.get('/stats', authenticate, OpportunityController.getOpportunityStats);
+router.post('/:id/eoi', authenticate, OpportunityController.ensureOpportunityEOI);
+router.post('/:id/proposal/ensure', authenticate, OpportunityController.ensureOpportunityProposal);
 router.get('/:id/proposal', authenticate, OpportunityController.getOpportunityProposal);
 router.put('/:id/proposal', authenticate, OpportunityController.upsertOpportunityProposal);
 router.post('/:id/proposal/start-implementation', authenticate, OpportunityController.startProposalImplementation);

@@ -3,10 +3,112 @@ import { addAwardedDecisionFields } from '../scripts/add-awarded-decision-fields
 
 class EOI {
   static awardedFieldsReady = false;
+  static opportunityLinkReady = false;
+  static attachmentFieldsReady = false;
+  static goDecisionFieldReady = false;
+  static assignedToColumnReady = false;
+
+  static async ensureAssignedToColumn() {
+    if (this.assignedToColumnReady) return;
+    await this.createTable();
+
+    const [rows] = await pool.execute(
+      `SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'eois'
+         AND COLUMN_NAME = 'assigned_to'`
+    );
+
+    if (rows.length > 0) {
+      const dataType = String(rows[0].DATA_TYPE || '').toLowerCase();
+      const maxLen = Number(rows[0].CHARACTER_MAXIMUM_LENGTH || 0);
+      // Prefer TEXT; fall back already applied DBs stay TEXT. Widen short VARCHAR.
+      if (dataType === 'varchar' && maxLen > 0 && maxLen < 2000) {
+        await pool.execute('ALTER TABLE eois MODIFY COLUMN assigned_to TEXT NULL');
+        console.log('Widened eois.assigned_to to TEXT');
+      }
+    }
+
+    this.assignedToColumnReady = true;
+  }
+
+  static async ensureGoDecisionField() {
+    if (this.goDecisionFieldReady) return;
+    await this.createTable();
+
+    const [rows] = await pool.execute(
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'eois'
+         AND COLUMN_NAME = 'go_decision'`
+    );
+
+    if (rows.length === 0) {
+      await pool.execute(
+        "ALTER TABLE eois ADD COLUMN go_decision ENUM('pending', 'go', 'not_go') NOT NULL DEFAULT 'pending' AFTER status"
+      );
+      console.log('Added eois.go_decision');
+    }
+
+    this.goDecisionFieldReady = true;
+  }
+
+  static async ensureAttachmentFields() {
+    if (this.attachmentFieldsReady) return;
+    await this.createTable();
+
+    const columns = [
+      { name: 'attached_document', ddl: 'ADD COLUMN attached_document LONGTEXT NULL' },
+      { name: 'attached_document_name', ddl: 'ADD COLUMN attached_document_name VARCHAR(255) NULL' },
+    ];
+
+    for (const column of columns) {
+      const [rows] = await pool.execute(
+        `SELECT COLUMN_NAME
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = 'eois'
+           AND COLUMN_NAME = ?`,
+        [column.name]
+      );
+
+      if (rows.length === 0) {
+        await pool.execute(`ALTER TABLE eois ${column.ddl}`);
+        console.log(`Added eois.${column.name}`);
+      }
+    }
+
+    this.attachmentFieldsReady = true;
+  }
+
+  static async ensureOpportunityLink() {
+    if (this.opportunityLinkReady) return;
+    await this.createTable();
+
+    const [rows] = await pool.execute(
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'eois'
+         AND COLUMN_NAME = 'opportunity_id'`
+    );
+
+    if (rows.length === 0) {
+      await pool.execute(
+        'ALTER TABLE eois ADD COLUMN opportunity_id INT NULL UNIQUE AFTER eoi_id'
+      );
+      console.log('Added eois.opportunity_id');
+    }
+
+    this.opportunityLinkReady = true;
+  }
 
   static async ensureAwardedFields() {
     if (this.awardedFieldsReady) return;
     await this.createTable();
+    await this.ensureOpportunityLink();
     await addAwardedDecisionFields();
     this.awardedFieldsReady = true;
   }
@@ -22,7 +124,7 @@ class EOI {
         deadline DATE NOT NULL,
         status ENUM('draft', 'submitted', 'under_review', 'shortlisted', 'rejected', 'accepted') DEFAULT 'draft',
         value DECIMAL(15,2) NOT NULL DEFAULT 0,
-        assigned_to VARCHAR(255) NULL,
+        assigned_to TEXT NULL,
         description TEXT NOT NULL,
         requirements TEXT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -85,6 +187,7 @@ class EOI {
 
   static async create({
     eoiId,
+    opportunityId,
     title,
     organization,
     submissionDate,
@@ -95,32 +198,121 @@ class EOI {
     description,
     requirements
   }) {
+    await this.ensureOpportunityLink();
+    await this.ensureAssignedToColumn();
     const id = eoiId || await this.generateEOIId();
     
     // Convert requirements array to JSON string if array, otherwise store as is
     const requirementsStr = Array.isArray(requirements) 
       ? JSON.stringify(requirements) 
       : requirements || null;
+
+    const assignedToValue = Array.isArray(assignedTo)
+      ? assignedTo.join(', ')
+      : assignedTo || null;
     
     const [result] = await pool.execute(
       `INSERT INTO eois (
-        eoi_id, title, organization, submission_date, deadline, status, 
+        eoi_id, opportunity_id, title, organization, submission_date, deadline, status, 
         value, assigned_to, description, requirements
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        id, title, organization, submissionDate, deadline, status,
-        value, assignedTo || null, description, requirementsStr
+        id, opportunityId || null, title, organization, submissionDate, deadline, status,
+        value, assignedToValue, description, requirementsStr
       ]
     );
 
     return this.findById(result.insertId);
   }
 
+  static async findByOpportunityDbId(opportunityDbId) {
+    await this.ensureOpportunityLink();
+    const [rows] = await pool.execute(
+      'SELECT * FROM eois WHERE opportunity_id = ? LIMIT 1',
+      [opportunityDbId]
+    );
+
+    if (rows.length === 0) return null;
+    return this.mapRowToEOI(rows[0]);
+  }
+
+  static async findGoLinkedOpportunityIds() {
+    await this.ensureGoDecisionField();
+    const [rows] = await pool.execute(
+      `SELECT opportunity_id
+       FROM eois
+       WHERE go_decision = 'go'
+         AND opportunity_id IS NOT NULL
+         AND opportunity_id > 0`
+    );
+    return rows.map((row) => row.opportunity_id);
+  }
+
+  static async findAllGoWithOpportunityLink() {
+    await this.ensureGoDecisionField();
+    const [rows] = await pool.execute(
+      `SELECT id, eoi_id, opportunity_id, title, go_decision
+       FROM eois
+       WHERE go_decision = 'go'
+         AND opportunity_id IS NOT NULL
+         AND opportunity_id > 0`
+    );
+    return rows.map((row) => ({
+      dbId: row.id,
+      id: row.eoi_id,
+      opportunityId: row.opportunity_id,
+      title: row.title,
+      goDecision: row.go_decision,
+    }));
+  }
+
   static async findAll(filters = {}) {
+    await this.ensureAttachmentFields();
+    await this.ensureGoDecisionField();
+
+    try {
+      return await this.findAllWithAttachments(filters);
+    } catch (error) {
+      if (this.isAttachmentSchemaError(error)) {
+        console.warn('EOI attachment list query failed, using basic list query:', error.message);
+        return await this.findAllBasic(filters);
+      }
+      throw error;
+    }
+  }
+
+  static isAttachmentSchemaError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return (
+      message.includes('attached_document') ||
+      message.includes('go_decision') ||
+      message.includes('unknown column') ||
+      message.includes("doesn't exist")
+    );
+  }
+
+  static async findAllWithAttachments(filters = {}) {
+    const excludeDocuments = filters.excludeDocuments !== false;
+    const selectClause = excludeDocuments
+      ? `id, eoi_id, opportunity_id, title, organization, submission_date, deadline, status, go_decision,
+         value, assigned_to, description, requirements, decision, implementation_start_date,
+         implementation_due_date, implementation_id, attached_document_name, created_at, updated_at,
+         (attached_document IS NOT NULL) AS has_attached_document`
+      : '*';
+
     let query = `
-      SELECT * FROM eois WHERE 1=1
+      SELECT ${selectClause} FROM eois WHERE 1=1
     `;
-    const params = [];
+    return this.executeListQuery(query, [], excludeDocuments, filters);
+  }
+
+  static async findAllBasic(filters = {}) {
+    let query = `SELECT * FROM eois WHERE 1=1`;
+    return this.executeListQuery(query, [], false, filters);
+  }
+
+  static async executeListQuery(query, initialParams, forList, filters = {}) {
+    const params = [...initialParams];
 
     if (filters.status) {
       query += ` AND status = ?`;
@@ -150,33 +342,50 @@ class EOI {
     }
 
     const [rows] = await pool.execute(query, params);
-    return rows.map(row => this.mapRowToEOI(row));
+    return rows.map((row) => this.mapRowToEOI(row, { forList }));
   }
 
-  static async findById(id) {
+  static async findById(id, options = {}) {
     await this.ensureAwardedFields();
-    const [rows] = await pool.execute(
-      'SELECT * FROM eois WHERE id = ?',
-      [id]
-    );
+    await this.ensureAttachmentFields();
+    await this.ensureGoDecisionField();
+    const excludeDocuments = options.excludeDocuments === true;
+    const selectClause = excludeDocuments
+      ? `id, eoi_id, opportunity_id, title, organization, submission_date, deadline, status, go_decision,
+         value, assigned_to, description, requirements, decision, implementation_start_date,
+         implementation_due_date, implementation_id, attached_document_name, created_at, updated_at,
+         (attached_document IS NOT NULL) AS has_attached_document`
+      : '*';
+
+    const [rows] = await pool.execute(`SELECT ${selectClause} FROM eois WHERE id = ?`, [id]);
 
     if (rows.length === 0) return null;
-    return this.mapRowToEOI(rows[0]);
+    return this.mapRowToEOI(rows[0], { forList: excludeDocuments });
   }
 
-  static async findByEOIId(eoiId) {
+  static async findByEOIId(eoiId, options = {}) {
     await this.ensureAwardedFields();
-    const [rows] = await pool.execute(
-      'SELECT * FROM eois WHERE eoi_id = ?',
-      [eoiId]
-    );
+    await this.ensureAttachmentFields();
+    await this.ensureGoDecisionField();
+    const excludeDocuments = options.excludeDocuments === true;
+    const selectClause = excludeDocuments
+      ? `id, eoi_id, opportunity_id, title, organization, submission_date, deadline, status, go_decision,
+         value, assigned_to, description, requirements, decision, implementation_start_date,
+         implementation_due_date, implementation_id, attached_document_name, created_at, updated_at,
+         (attached_document IS NOT NULL) AS has_attached_document`
+      : '*';
+
+    const [rows] = await pool.execute(`SELECT ${selectClause} FROM eois WHERE eoi_id = ?`, [eoiId]);
 
     if (rows.length === 0) return null;
-    return this.mapRowToEOI(rows[0]);
+    return this.mapRowToEOI(rows[0], { forList: excludeDocuments });
   }
 
   static async update(id, updateData) {
     await this.ensureAwardedFields();
+    await this.ensureAttachmentFields();
+    await this.ensureGoDecisionField();
+    await this.ensureAssignedToColumn();
     const fields = [];
     const values = [];
 
@@ -200,13 +409,20 @@ class EOI {
       fields.push('status = ?');
       values.push(updateData.status);
     }
+    if (updateData.goDecision !== undefined) {
+      fields.push('go_decision = ?');
+      values.push(updateData.goDecision);
+    }
     if (updateData.value !== undefined) {
       fields.push('value = ?');
       values.push(updateData.value);
     }
     if (updateData.assignedTo !== undefined) {
+      const assignedToValue = Array.isArray(updateData.assignedTo)
+        ? updateData.assignedTo.join(', ')
+        : updateData.assignedTo;
       fields.push('assigned_to = ?');
-      values.push(updateData.assignedTo);
+      values.push(assignedToValue);
     }
     if (updateData.description !== undefined) {
       fields.push('description = ?');
@@ -234,6 +450,14 @@ class EOI {
     if (updateData.implementationId !== undefined) {
       fields.push('implementation_id = ?');
       values.push(updateData.implementationId || null);
+    }
+    if (updateData.attachedDocument !== undefined) {
+      fields.push('attached_document = ?');
+      values.push(updateData.attachedDocument || null);
+    }
+    if (updateData.attachedDocumentName !== undefined) {
+      fields.push('attached_document_name = ?');
+      values.push(updateData.attachedDocumentName || null);
     }
 
     if (fields.length === 0) {
@@ -278,7 +502,8 @@ class EOI {
     };
   }
 
-  static mapRowToEOI(row) {
+  static mapRowToEOI(row, options = {}) {
+    const { forList = false } = options;
     // Parse requirements JSON string to array
     let requirements = [];
     if (row.requirements) {
@@ -295,11 +520,13 @@ class EOI {
     return {
       id: row.eoi_id,
       dbId: row.id,
+      opportunityId: row.opportunity_id || null,
       title: row.title,
       organization: row.organization,
       submissionDate: row.submission_date ? row.submission_date.toISOString().split('T')[0] : null,
       deadline: row.deadline ? row.deadline.toISOString().split('T')[0] : null,
       status: row.status,
+      goDecision: row.go_decision || 'pending',
       value: parseFloat(row.value) || 0,
       assignedTo: row.assigned_to,
       description: row.description,
@@ -312,6 +539,12 @@ class EOI {
         ? row.implementation_due_date.toISOString().split('T')[0]
         : null,
       implementationId: row.implementation_id || null,
+      attachedDocument: forList ? null : row.attached_document || null,
+      attachedDocumentName: row.attached_document_name || null,
+      hasAttachedDocument: Boolean(
+        row.has_attached_document ??
+          (row.attached_document && String(row.attached_document).length > 0)
+      ),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

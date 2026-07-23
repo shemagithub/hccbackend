@@ -1,11 +1,13 @@
 import ProjectAssignment from '../models/ProjectAssignment.js';
 import Staff from '../models/Staff.js';
+import { rebuildProjectTeamFromAssignments } from '../utils/projectTeam.js';
 
 export const getProjectAssignments = async (req, res) => {
   try {
     const filters = {};
+    const hasProjectScope = Boolean(req.query.projectId);
     
-    if (req.staffId) {
+    if (!hasProjectScope && req.staffId) {
       const staff = await Staff.findById(req.staffId);
       if (staff && staff.role !== 'superadmin' && staff.role !== 'finance' && staff.role !== 'admin') {
         filters.staffEmail = staff.email;
@@ -56,6 +58,8 @@ export const createProjectAssignment = async (req, res) => {
       status, skillsRequired, skillsAssigned, notes, createdBy: req.staffId
     });
 
+    await rebuildProjectTeamFromAssignments(projectId);
+
     res.status(201).json({ success: true, data: assignment, message: 'Project assignment created successfully' });
   } catch (error) {
     console.error('Create project assignment error:', error);
@@ -65,10 +69,17 @@ export const createProjectAssignment = async (req, res) => {
 
 export const updateProjectAssignment = async (req, res) => {
   try {
+    const existing = await ProjectAssignment.findById(parseInt(req.params.id));
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Project assignment not found' });
+    }
+
     const updated = await ProjectAssignment.update(parseInt(req.params.id), req.body);
     if (!updated) {
       return res.status(400).json({ success: false, message: 'No changes made' });
     }
+
+    await rebuildProjectTeamFromAssignments(existing.projectId);
 
     const assignment = await ProjectAssignment.findById(parseInt(req.params.id));
     res.json({ success: true, data: assignment, message: 'Project assignment updated successfully' });
@@ -80,10 +91,18 @@ export const updateProjectAssignment = async (req, res) => {
 
 export const deleteProjectAssignment = async (req, res) => {
   try {
+    const existing = await ProjectAssignment.findById(parseInt(req.params.id));
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Project assignment not found' });
+    }
+
     const deleted = await ProjectAssignment.delete(parseInt(req.params.id));
     if (!deleted) {
       return res.status(404).json({ success: false, message: 'Project assignment not found' });
     }
+
+    await rebuildProjectTeamFromAssignments(existing.projectId);
+
     res.json({ success: true, message: 'Project assignment deleted successfully' });
   } catch (error) {
     console.error('Delete project assignment error:', error);

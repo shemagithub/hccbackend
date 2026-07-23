@@ -1,6 +1,7 @@
 import { testConnection, ensureDatabase } from '../config/db.js';
-import { initializeDatabaseSchema } from './init-database-schema.js';
-async function initializeAllTables() {
+import { ensureSchemaFromSql, importSqlSchema } from './import-sql-schema.js';
+
+async function initializeAllTables({ force = false } = {}) {
   try {
     console.log('🔍 Ensuring database exists...');
     await ensureDatabase();
@@ -13,8 +14,11 @@ async function initializeAllTables() {
       process.exit(1);
     }
 
-    await initializeDatabaseSchema();
-
+    if (force) {
+      await importSqlSchema({ force: true });
+    } else {
+      await ensureSchemaFromSql();
+    }
   } catch (error) {
     console.error('❌ Error initializing tables:', error);
     console.error('   Details:', error.message);
@@ -29,7 +33,8 @@ async function initializeAllTables() {
 if (import.meta.url === `file://${process.argv[1]}` || import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))) {
   (async () => {
     try {
-      await initializeAllTables();
+      const force = process.argv.includes('--force');
+      await initializeAllTables({ force });
       process.exit(0);
     } catch (error) {
       console.error('❌ Script failed:', error);

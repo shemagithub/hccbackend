@@ -1,6 +1,12 @@
 import Project from '../models/Project.js';
 import Staff from '../models/Staff.js';
 import Implementation from '../models/Implementation.js';
+import {
+  isProjectManagerPortalStaff,
+  resolveManagerPortalProjects,
+} from '../utils/projectTeam.js';
+import { startImplementationWorkflow } from '../utils/bootstrapProjectManagement.js';
+import { isSuperAdminRole } from '../utils/rolePermissions.js';
 
 export class ProjectController {
   // Create a new project
@@ -97,7 +103,7 @@ export class ProjectController {
               description: description || null,
               startDate: startDate,
               endDate: endDate,
-              status: 'planning',
+              status: 'in_progress',
               progress: progress || 0,
               budget: budget || 0,
               spent: spent || 0,
@@ -106,7 +112,18 @@ export class ProjectController {
               priority: priority || 'medium',
               createdBy: req.staffId || null
             });
+            await startImplementationWorkflow(project.dbId, {
+              staffId: req.staffId || null,
+              startDate,
+              endDate,
+            });
             console.log(`✅ Auto-created implementation for approved project: ${project.name}`);
+          } else {
+            await startImplementationWorkflow(project.dbId, {
+              staffId: req.staffId || null,
+              startDate,
+              endDate,
+            });
           }
         } catch (implError) {
           console.error('Error auto-creating implementation:', implError);
@@ -160,7 +177,7 @@ export class ProjectController {
           if (staff) {
             // Check if user is SuperAdmin or Finance - always give full access
             const userRole = staff.role?.toLowerCase() || '';
-            if (userRole === 'superadmin' || userRole === 'finance') {
+            if (isSuperAdminRole(staff.role) || userRole === 'finance' || userRole === 'admin' || userRole === 'administrator') {
               isSuperAdmin = true;
               userEmail = null; // SuperAdmin and Finance get all projects
               console.log(`📋 getProjects - ${staff.role} user detected, granting full access`);
@@ -194,9 +211,21 @@ export class ProjectController {
       const projects = await Project.findAll(filters);
       const stats = await Project.getStats(filters);
 
+      let mergedProjects = projects;
+      if (req.staffId && !shouldIncludeAll && !isSuperAdmin) {
+        try {
+          const staff = await Staff.findById(req.staffId);
+          if (staff && isProjectManagerPortalStaff(staff)) {
+            mergedProjects = await resolveManagerPortalProjects(staff);
+          }
+        } catch (mergeError) {
+          console.error('Error loading project manager portal projects:', mergeError);
+        }
+      }
+
       res.json({
         success: true,
-        data: projects,
+        data: mergedProjects,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
@@ -315,7 +344,7 @@ export class ProjectController {
                 description: updatedProject.description || null,
                 startDate: updatedProject.startDate,
                 endDate: updatedProject.endDate,
-                status: 'planning',
+                status: 'in_progress',
                 progress: updatedProject.progress || 0,
                 budget: updatedProject.budget || 0,
                 spent: updatedProject.spent || 0,
@@ -326,6 +355,11 @@ export class ProjectController {
               });
               console.log(`✅ Auto-created implementation for approved project: ${updatedProject.name}`);
             }
+            await startImplementationWorkflow(updatedProject.dbId, {
+              staffId: req.staffId || null,
+              startDate: updatedProject.startDate,
+              endDate: updatedProject.endDate,
+            });
           } catch (implError) {
             console.error('Error auto-creating implementation:', implError);
             // Don't fail the project update if implementation creation fails

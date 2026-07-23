@@ -1,9 +1,0 @@
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=
-DB_NAME=hcc
-PORT=5000
-NODE_ENV=production
-API_BASE_URL=https://hcc.guzekustomz.com
-CORS_ORIGINS=

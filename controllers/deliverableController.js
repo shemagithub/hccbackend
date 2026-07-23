@@ -1,6 +1,7 @@
 import Deliverable from '../models/Deliverable.js';
 import Staff from '../models/Staff.js';
 import Review from '../models/Review.js';
+import { resolveStaffProjectPermissions } from '../utils/projectTeam.js';
 
 export class DeliverableController {
   // Create a new deliverable
@@ -29,6 +30,14 @@ export class DeliverableController {
         return res.status(400).json({
           success: false,
           message: 'Type, title, and submission date are required.'
+        });
+      }
+
+      const permissions = await resolveStaffProjectPermissions(req.staffId, projectId ? parseInt(projectId, 10) : null);
+      if (!permissions.canCreateDeliverables) {
+        return res.status(403).json({
+          success: false,
+          message: 'Viewers cannot create deliverables',
         });
       }
 

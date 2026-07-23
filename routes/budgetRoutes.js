@@ -7,6 +7,9 @@ const router = express.Router();
 // All budget routes require authentication
 router.use(authenticate);
 
+// Get profit/loss report (must be before /:id)
+router.get('/profit-loss', BudgetController.getProfitLossReport);
+
 // Get all budgets
 router.get('/', BudgetController.getBudgets);
 

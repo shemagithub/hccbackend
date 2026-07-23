@@ -1,5 +1,8 @@
 import Implementation from '../models/Implementation.js';
 import Staff from '../models/Staff.js';
+import { syncProjectTeam } from '../utils/projectTeam.js';
+import { startImplementationWorkflow } from '../utils/bootstrapProjectManagement.js';
+import { isSuperAdminRole } from '../utils/rolePermissions.js';
 
 export class ImplementationController {
   // Create a new implementation
@@ -12,13 +15,14 @@ export class ImplementationController {
         description,
         startDate,
         endDate,
-        status = 'planning',
+        status = 'in_progress',
         progress = 0,
         budget = 0,
         spent = 0,
         assignedTo,
         teamSize = 0,
-        priority = 'medium'
+        priority = 'medium',
+        team,
       } = req.body;
 
       // Validation
@@ -59,9 +63,27 @@ export class ImplementationController {
         result = linked.implementation;
       }
 
+      if (Array.isArray(team) && team.length > 0 && result?.projectId) {
+        await syncProjectTeam(result.projectId, team, {
+          startDate,
+          endDate,
+          createdBy: req.staffId || null,
+        });
+        result = await Implementation.findById(result.dbId);
+      }
+
+      if (result?.projectId) {
+        await startImplementationWorkflow(result.projectId, {
+          staffId: req.staffId || null,
+          startDate,
+          endDate,
+        });
+        result = await Implementation.findById(result.dbId);
+      }
+
       res.status(201).json({
         success: true,
-        message: 'Implementation created successfully',
+        message: 'Implementation started. Initiation and planning are complete; execution is in progress.',
         data: result
       });
     } catch (error) {
@@ -104,7 +126,7 @@ export class ImplementationController {
           if (staff) {
             // Check if user is SuperAdmin or Finance - always give full access
             const userRole = staff.role?.toLowerCase() || '';
-            if (userRole === 'superadmin' || userRole === 'finance') {
+            if (isSuperAdminRole(staff.role) || userRole === 'finance' || userRole === 'admin' || userRole === 'administrator') {
               isSuperAdmin = true;
               userEmail = null; // SuperAdmin and Finance get all implementations
               console.log(`📋 getImplementations - ${staff.role} user detected, granting full access`);
@@ -130,6 +152,7 @@ export class ImplementationController {
         department,
         departmentId: departmentId ? parseInt(departmentId) : undefined,
         userEmail, // Filter by assigned user (null for SuperAdmin or when includeAll is true)
+        requireLinkedProject: !isSuperAdmin,
         limit: parseInt(limit),
         offset: (parseInt(page) - 1) * parseInt(limit)
       };
@@ -190,7 +213,7 @@ export class ImplementationController {
   static async updateImplementation(req, res) {
     try {
       const { id } = req.params;
-      const updateData = req.body;
+      const { team, ...updateData } = req.body;
 
       if (!id) {
         return res.status(400).json({
@@ -213,10 +236,34 @@ export class ImplementationController {
       const updated = await Implementation.update(dbId, updateData);
 
       if (updated) {
+        if (Array.isArray(team) && updated.projectId) {
+          await syncProjectTeam(updated.projectId, team, {
+            startDate: updateData.startDate || updated.startDate,
+            endDate: updateData.endDate || updated.endDate,
+            createdBy: req.staffId || null,
+          });
+        }
+
+        const refreshed = await Implementation.findById(dbId);
+        const projectId = refreshed?.projectId || updated.projectId;
+        const wasNotInExecution = implementation.status !== 'in_progress';
+        const isNowInExecution = (refreshed?.status || updateData.status) === 'in_progress';
+
+        if (projectId && wasNotInExecution && isNowInExecution) {
+          await startImplementationWorkflow(projectId, {
+            staffId: req.staffId || null,
+            startDate: updateData.startDate || refreshed?.startDate || updated.startDate,
+            endDate: updateData.endDate || refreshed?.endDate || updated.endDate,
+          });
+        }
+
+        const finalRecord = projectId ? await Implementation.findById(dbId) : refreshed;
         res.json({
           success: true,
-          message: 'Implementation updated successfully',
-          data: updated
+          message: wasNotInExecution && isNowInExecution
+            ? 'Implementation updated. Initiation and planning are complete; execution is in progress.'
+            : 'Implementation updated successfully',
+          data: finalRecord || refreshed || updated
         });
       } else {
         res.status(500).json({
@@ -276,6 +323,38 @@ export class ImplementationController {
         success: false,
         message: 'Failed to delete implementation',
         error: error.message
+      });
+    }
+  }
+
+  static async startWorkflowForProject(req, res) {
+    try {
+      const projectId = parseInt(req.params.projectId, 10);
+      if (!projectId) {
+        return res.status(400).json({ success: false, message: 'Valid project ID is required' });
+      }
+
+      const result = await startImplementationWorkflow(projectId, {
+        staffId: req.staffId || null,
+      });
+
+      if (!result.started) {
+        return res.status(400).json({
+          success: false,
+          message: result.reason === 'project_not_found' ? 'Project not found' : 'Could not start workflow',
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'Implementation workflow initialized. Initiation and planning are complete; execution is in progress.',
+        data: result,
+      });
+    } catch (error) {
+      console.error('Start workflow error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Failed to start implementation workflow',
       });
     }
   }

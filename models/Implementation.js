@@ -18,7 +18,7 @@ class Implementation {
         progress INT DEFAULT 0,
         budget DECIMAL(15,2) NOT NULL DEFAULT 0,
         spent DECIMAL(15,2) NOT NULL DEFAULT 0,
-        assigned_to VARCHAR(255) NULL,
+        assigned_to TEXT NULL,
         team_size INT DEFAULT 0,
         priority ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
         created_by INT NULL,
@@ -108,14 +108,20 @@ class Implementation {
         i.assigned_to LIKE ? OR
         i.assigned_to LIKE ? OR
         i.assigned_to LIKE ? OR
-        i.assigned_to = ?
+        i.assigned_to = ? OR
+        i.project_id IN (
+          SELECT pa.project_id
+          FROM project_assignments pa
+          INNER JOIN staff s ON pa.staff_id = s.id
+          WHERE s.email = ? AND pa.status IN ('active', 'pending')
+        )
       )`;
       // Match email at start, middle, or end of comma-separated list
       const emailPattern1 = `${filters.userEmail},%`; // Email at start
       const emailPattern2 = `%,${filters.userEmail},%`; // Email in middle
       const emailPattern3 = `%,${filters.userEmail}`; // Email at end
       const exactMatch = filters.userEmail; // Exact match (single email)
-      params.push(emailPattern1, emailPattern2, emailPattern3, exactMatch);
+      params.push(emailPattern1, emailPattern2, emailPattern3, exactMatch, filters.userEmail);
     }
 
     if (filters.status) {
@@ -149,6 +155,12 @@ class Implementation {
         SELECT 1 FROM departments d WHERE d.id = ? AND d.name = p.department
       )`;
       params.push(filters.departmentId);
+    }
+
+    if (filters.requireLinkedProject) {
+      query += ` AND p.id IS NOT NULL`;
+    } else if (filters.excludeOrphaned !== false) {
+      query += ` AND (i.project_id IS NULL OR p.id IS NOT NULL)`;
     }
 
     query += ` ORDER BY i.created_at DESC`;
@@ -326,6 +338,12 @@ class Implementation {
   static async delete(id) {
     const [result] = await pool.execute('DELETE FROM implementations WHERE id = ?', [id]);
     return result.affectedRows > 0;
+  }
+
+  static async deleteByProjectId(projectId) {
+    if (!projectId) return false;
+    const [result] = await pool.execute('DELETE FROM implementations WHERE project_id = ?', [projectId]);
+    return result.affectedRows >= 0;
   }
 
   static mapRowToImplementation(row) {

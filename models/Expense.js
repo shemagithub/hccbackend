@@ -1,4 +1,6 @@
 import pool from '../config/db.js';
+import Project from './Project.js';
+import Implementation from './Implementation.js';
 
 class Expense {
   static async createTable() {
@@ -440,6 +442,44 @@ class Expense {
   static async delete(id) {
     const [result] = await pool.execute('DELETE FROM expenses WHERE id = ?', [id]);
     return result.affectedRows > 0;
+  }
+
+  static async getProjectExpenseTotal(projectId, { excludeRejected = true } = {}) {
+    if (!projectId) return 0;
+
+    let query = `
+      SELECT COALESCE(SUM(amount), 0) AS total
+      FROM expenses
+      WHERE project_id = ?
+    `;
+    const params = [projectId];
+
+    if (excludeRejected) {
+      query += ` AND status != 'rejected'`;
+    }
+
+    const [rows] = await pool.execute(query, params);
+    return parseFloat(rows[0]?.total || 0);
+  }
+
+  /** Recalculate project + linked implementation spent from expense records. */
+  static async syncProjectSpentFromExpenses(projectId) {
+    if (!projectId) return 0;
+
+    const spent = await this.getProjectExpenseTotal(projectId);
+
+    await Project.update(projectId, { spent });
+
+    try {
+      const implementation = await Implementation.findByProjectId(projectId);
+      if (implementation?.dbId) {
+        await Implementation.update(implementation.dbId, { spent });
+      }
+    } catch (error) {
+      console.error('Error syncing implementation spent from expenses:', error);
+    }
+
+    return spent;
   }
 
   static async getStats(projectId = null) {

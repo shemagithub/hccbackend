@@ -33,36 +33,84 @@ class ProjectAssignment {
   }
 
   static async generateAssignmentId() {
-    const [rows] = await pool.execute(
-      'SELECT COUNT(*) as count FROM project_assignments WHERE YEAR(created_at) = YEAR(NOW())'
-    );
-    const count = rows[0].count;
     const year = new Date().getFullYear();
-    const sequence = String(count + 1).padStart(4, '0');
-    return `PA-${year}-${sequence}`;
+    const prefix = `PA-${year}-`;
+
+    const [rows] = await pool.execute(
+      `SELECT assignment_id FROM project_assignments
+       WHERE assignment_id LIKE ?
+       ORDER BY CAST(SUBSTRING(assignment_id, ?) AS UNSIGNED) DESC
+       LIMIT 1`,
+      [`${prefix}%`, prefix.length + 1]
+    );
+
+    let nextSequence = 1;
+    if (rows.length > 0) {
+      const lastId = rows[0].assignment_id;
+      const match = String(lastId).match(/PA-\d{4}-(\d+)$/);
+      if (match) {
+        nextSequence = parseInt(match[1], 10) + 1;
+      }
+    }
+
+    return `${prefix}${String(nextSequence).padStart(4, '0')}`;
+  }
+
+  static async findByProjectAndStaff(projectId, staffId) {
+    const [rows] = await pool.execute(
+      `SELECT pa.*, p.name as project_name, p.project_id as project_code, p.status as project_status,
+              s.first_name, s.last_name, s.email, s.position, s.department_id,
+              d.name as department_name
+       FROM project_assignments pa
+       LEFT JOIN projects p ON pa.project_id = p.id
+       LEFT JOIN staff s ON pa.staff_id = s.id
+       LEFT JOIN departments d ON s.department_id = d.id
+       WHERE pa.project_id = ? AND pa.staff_id = ?
+       ORDER BY pa.updated_at DESC
+       LIMIT 1`,
+      [projectId, staffId]
+    );
+
+    if (rows.length === 0) return null;
+    return this.mapRowToAssignment(rows[0]);
   }
 
   static async create({
     assignmentId, projectId, staffId, role, allocationPercentage = 100.00,
     startDate, endDate, status = 'active', skillsRequired, skillsAssigned, notes, createdBy
   }) {
-    const aId = assignmentId || await this.generateAssignmentId();
+    const maxAttempts = 5;
+    let lastError = null;
 
-    const [result] = await pool.execute(
-      `INSERT INTO project_assignments (
-        assignment_id, project_id, staff_id, role, allocation_percentage,
-        start_date, end_date, status, skills_required, skills_assigned, notes, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        aId, projectId, staffId, role || null, allocationPercentage,
-        startDate, endDate || null, status,
-        skillsRequired ? JSON.stringify(skillsRequired) : null,
-        skillsAssigned ? JSON.stringify(skillsAssigned) : null,
-        notes || null, createdBy || null
-      ]
-    );
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const aId = assignmentId || await this.generateAssignmentId();
 
-    return await this.findById(result.insertId);
+      try {
+        const [result] = await pool.execute(
+          `INSERT INTO project_assignments (
+            assignment_id, project_id, staff_id, role, allocation_percentage,
+            start_date, end_date, status, skills_required, skills_assigned, notes, created_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            aId, projectId, staffId, role || null, allocationPercentage,
+            startDate, endDate || null, status,
+            skillsRequired ? JSON.stringify(skillsRequired) : null,
+            skillsAssigned ? JSON.stringify(skillsAssigned) : null,
+            notes || null, createdBy || null
+          ]
+        );
+
+        return await this.findById(result.insertId);
+      } catch (error) {
+        lastError = error;
+        if (error.code === 'ER_DUP_ENTRY' && !assignmentId) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw lastError || new Error('Failed to generate a unique project assignment ID');
   }
 
   static async findAll(filters = {}) {

@@ -1,4 +1,19 @@
 import Task from '../models/Task.js';
+import Staff from '../models/Staff.js';
+import {
+  isElevatedProjectTeamCreator,
+  isProjectManagerPortalStaff,
+  getStaffProjectRole,
+  canManageProjectRole,
+  isTaskAssignee,
+} from '../utils/projectTeam.js';
+import {
+  resolveTaskApprovalContext,
+  canReviewTaskAtStage,
+  buildSubmissionUpdate,
+  buildApprovalUpdate,
+  getApprovalStageLabel,
+} from '../utils/taskApproval.js';
 
 export class TaskController {
   // Create a new task
@@ -22,6 +37,10 @@ export class TaskController {
         actualHours,
         dependencies,
         tags,
+        attachmentData,
+        attachmentName,
+        attachmentType,
+        attachmentSize,
       } = req.body;
 
       const createdBy = req.staffId || null;
@@ -158,12 +177,23 @@ export class TaskController {
         actualHours: cleanActualHours,
         dependencies: cleanDependencies,
         tags: cleanTags,
+        attachmentData: attachmentData || null,
+        attachmentName: attachmentName || null,
+        attachmentType: attachmentType || null,
+        attachmentSize: attachmentSize || null,
+        approvalStatus: 'not_required',
+        approvalStage: 'none',
+        approvedBy: null,
+        approvalNotes: null,
+        submittedAt: null,
+        submittedBy: null,
+        submitterRole: null,
         createdBy
       });
 
       res.status(201).json({
         success: true,
-        message: 'Task created successfully',
+        message: 'Task created. Assignee must complete work and submit for approval.',
         data: task
       });
     } catch (error) {
@@ -298,6 +328,69 @@ export class TaskController {
         taskId = task.dbId;
       }
 
+      const approvalContext = await resolveTaskApprovalContext(req.staffId, task.projectId);
+      const isAssignee = isTaskAssignee(task, req.staffId);
+      const canManageTask =
+        approvalContext.isSuperAdmin ||
+        approvalContext.isPmPortal ||
+        canManageProjectRole(approvalContext.projectRole);
+
+      if (!canManageTask && !isAssignee) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only update tasks assigned to you on this project',
+        });
+      }
+
+      if (!canManageTask && isAssignee) {
+        const allowedFields = new Set([
+          'status',
+          'progress',
+          'actualHours',
+          'description',
+          'attachmentData',
+          'attachmentName',
+          'attachmentType',
+          'attachmentSize',
+          'submitForApproval',
+          'approvalNotes',
+        ]);
+        Object.keys(updateData).forEach((key) => {
+          if (!allowedFields.has(key)) delete updateData[key];
+        });
+      }
+
+      if (
+        (updateData.approvalStatus || updateData.approvalStage) &&
+        !canManageTask &&
+        !canReviewTaskAtStage(approvalContext, task)
+      ) {
+        delete updateData.approvalStatus;
+        delete updateData.approvalStage;
+        delete updateData.approvedBy;
+        delete updateData.approvalNotes;
+      }
+
+      const wantsApproval =
+        updateData.submitForApproval === true ||
+        (!canManageTask && (updateData.status === 'completed' || updateData.progress === 100));
+
+      const submittingForApproval =
+        isAssignee &&
+        wantsApproval &&
+        ['contributor', 'team_lead', 'project_manager'].includes(approvalContext.projectRole || 'contributor');
+
+      let submissionStage = null;
+      if (submittingForApproval) {
+        const submission = buildSubmissionUpdate(
+          approvalContext.projectRole || 'contributor',
+          req.staffId,
+        );
+        submissionStage = submission.approvalStage;
+        Object.assign(updateData, submission);
+        delete updateData.submitForApproval;
+      }
+
       const updated = await Task.update(taskId, updateData);
       
       if (!updated) {
@@ -309,9 +402,13 @@ export class TaskController {
 
       const updatedTask = await Task.findById(taskId);
 
+      const message = submittingForApproval
+        ? `Work submitted. ${getApprovalStageLabel(submissionStage, 'pending_approval')}.`
+        : 'Task updated successfully';
+
       res.json({
         success: true,
-        message: 'Task updated successfully',
+        message,
         data: updatedTask
       });
     } catch (error) {
@@ -320,6 +417,73 @@ export class TaskController {
         success: false,
         message: 'Failed to update task',
         error: error.message
+      });
+    }
+  }
+
+  static async reviewTask(req, res) {
+    try {
+      const { id } = req.params;
+      const { action, notes } = req.body;
+
+      if (!['approve', 'reject'].includes(action)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Action must be approve or reject',
+        });
+      }
+
+      let taskId = parseInt(id, 10);
+      let task = await Task.findById(taskId);
+      if (!task) {
+        task = await Task.findByTaskId(id);
+        if (!task) {
+          return res.status(404).json({ success: false, message: 'Task not found' });
+        }
+        taskId = task.dbId;
+      } else {
+        taskId = task.dbId;
+      }
+
+      const approvalContext = await resolveTaskApprovalContext(req.staffId, task.projectId);
+      if (!canReviewTaskAtStage(approvalContext, task)) {
+        return res.status(403).json({
+          success: false,
+          message: 'You do not have permission to review this task at the current approval step',
+        });
+      }
+
+      const updates = buildApprovalUpdate(task, approvalContext, {
+        action,
+        notes,
+        staffId: req.staffId,
+      });
+
+      const updated = await Task.update(taskId, updates);
+
+      if (!updated) {
+        return res.status(400).json({ success: false, message: 'Failed to review task' });
+      }
+
+      const updatedTask = await Task.findById(taskId);
+      let message = action === 'approve' ? 'Task approved successfully' : 'Task rejected and sent back for rework';
+      if (action === 'approve' && updatedTask.approvalStatus === 'pending_approval') {
+        message = 'Approved at this step. Waiting for the next approver in the chain.';
+      } else if (action === 'approve' && updatedTask.approvalStatus === 'approved') {
+        message = 'Task fully approved and ended.';
+      }
+
+      res.json({
+        success: true,
+        message,
+        data: updatedTask,
+      });
+    } catch (error) {
+      console.error('Review task error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to review task',
+        error: error.message,
       });
     }
   }

@@ -34,6 +34,7 @@ import FundRequest from '../models/FundRequest.js';
 import Driver from '../models/Driver.js';
 import Milestone from '../models/Milestone.js';
 import MeetingMinutes from '../models/MeetingMinutes.js';
+import { calculateSystemHealth } from '../utils/systemHealth.js';
 
 export class SuperAdminDashboardController {
   // Get comprehensive dashboard statistics from all control panels
@@ -141,26 +142,14 @@ export class SuperAdminDashboardController {
 
       const totalPendingItems = Object.values(pendingItems).reduce((sum, val) => sum + val, 0);
 
-      // Calculate system health score (0-100)
-      const healthFactors = {
-        activeStaff: (staffStats.active || 0) / Math.max(staffStats.total || 1, 1) * 100,
-        projectCompletion: (projectStats.completed || 0) / Math.max(projectStats.total || 1, 1) * 100,
-        taskCompletion: (taskStats.completed || 0) / Math.max(taskStats.total || 1, 1) * 100,
-        riskMitigation: (riskStats.mitigated || 0) / Math.max(riskStats.total || 1, 1) * 100,
-        issueResolution: (issueStats.resolved || 0) / Math.max(issueStats.total || 1, 1) * 100
-      };
-
-      const systemHealthScore = Math.round(
-        (healthFactors.activeStaff * 0.2 +
-         healthFactors.projectCompletion * 0.25 +
-         healthFactors.taskCompletion * 0.2 +
-         healthFactors.riskMitigation * 0.15 +
-         healthFactors.issueResolution * 0.2)
-      );
-
-      const systemHealth = systemHealthScore >= 80 ? 'Excellent' : 
-                          systemHealthScore >= 60 ? 'Good' : 
-                          systemHealthScore >= 40 ? 'Fair' : 'Poor';
+      const { healthFactors, systemHealthScore, systemHealth } = calculateSystemHealth({
+        staffStats,
+        projectStats,
+        taskStats,
+        riskStats,
+        issueStats,
+        totalPendingItems,
+      });
 
       res.json({
         success: true,
@@ -367,6 +356,7 @@ export class SuperAdminDashboardController {
             pendingItems,
             systemHealth,
             systemHealthScore,
+            healthFactors,
             totalBudget,
             totalSpent,
             totalRevenue,

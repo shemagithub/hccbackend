@@ -197,6 +197,14 @@ const corsAllowList = new Set([
   'https://test.guzekustomz.com',
   'https://test.wildjourneysrwanda.com',
   'http://test.wildjourneysrwanda.com',
+  'http://hccafrica.com',
+  'https://hccafrica.com',
+  'http://www.hccafrica.com',
+  'https://www.hccafrica.com',
+  'http://backend.hccafrica.com',
+  'https://management.hccafrica.com',
+  'http://management.hccafrica.com',
+  'https://backend.hccafrica.com',
   ...(process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim()) : []),
 ]);
 
@@ -209,7 +217,12 @@ const isAllowedCorsOrigin = (origin) => {
     if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
       return true;
     }
-    return hostname === 'guzekustomz.com' || hostname.endsWith('.guzekustomz.com');
+    return (
+      hostname === 'guzekustomz.com' ||
+      hostname.endsWith('.guzekustomz.com') ||
+      hostname === 'hccafrica.com' ||
+      hostname.endsWith('.hccafrica.com')
+    );
   } catch {
     return false;
   }
@@ -487,7 +500,7 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-const API_BASE_URL = process.env.API_BASE_URL || `https://hcc.guzekustomz.com`;
+const API_BASE_URL = process.env.API_BASE_URL || `https://backend.hccafrica.com`;
 
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 

@@ -87,3 +87,28 @@ npm start
 ### Dependencies Issues
 1. Run `npm install` to install all dependencies
 2. Check Node.js version compatibility
+
+## cPanel deployment
+
+`node_modules` is **not** in Git. After upload or `git pull` you must install packages on the server or you will see:
+
+`Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'express'`
+
+### Steps
+1. In **cPanel → Setup Node.js App**:
+   - Application root: `backend.kigalitaste.co` (folder that contains `package.json` + `app.js`)
+   - Application startup file: **`app.js`** (not `index.js`)
+   - Node.js version: **18+** (or 20/22)
+2. Open the app’s terminal / SSH into the app directory:
+   ```bash
+   cd ~/backend.kigalitaste.co
+   npm install --omit=dev
+   ```
+3. Create `.env` in that folder with your cPanel MySQL credentials (`NODE_ENV=production`).
+4. Click **Restart** on the Node.js App.
+
+If `bcrypt` fails to build during `npm install`, run:
+```bash
+npm rebuild bcrypt
+```
+or ask hosting support to enable build tools for native modules.

@@ -8,8 +8,20 @@ dotenv.config();
 const MIN_RECOMMENDED_PACKET_BYTES = 256 * 1024 * 1024;
 const SESSION_PACKET_BYTES = 268435456; // 256MB — matches typical shared-hosting GLOBAL limit
 
+/**
+ * cPanel/MySQL often rejects connections as user@'::1' when DB_HOST=localhost
+ * (Node resolves localhost to IPv6). Force IPv4 loopback unless an explicit host is set.
+ */
+function resolveDbHost(rawHost) {
+  const host = String(rawHost || '127.0.0.1').trim();
+  if (!host || host.toLowerCase() === 'localhost') {
+    return '127.0.0.1';
+  }
+  return host;
+}
+
 const dbConfig = {
-  host: process.env.DB_HOST || '127.0.0.1',
+  host: resolveDbHost(process.env.DB_HOST),
   port: Number(process.env.DB_PORT) || 3306,
   user: process.env.DB_USER || process.env.DB_USERNAME || 'root',
   password: process.env.DB_PASSWORD || '',

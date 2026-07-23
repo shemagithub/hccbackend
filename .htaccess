@@ -1,8 +1,27 @@
-Options -Indexes
+    Options -Indexes
 
-# cPanel Node.js deployment:
-# 1. Build frontend:  cd hcc && npm run build
-# 2. Copy build:      cp -r hcc/dist/* hccbackend/public/
-# 3. Setup Node.js App: startup file = app.js, root = hccbackend folder
-# 4. Set .env: NODE_ENV=production, RUN_SCHEMA_INIT=false, cPanel MySQL credentials
-# 5. Run npm install in hccbackend, then Restart app
+    # =============================================================================
+    # cPanel Node.js App (fixes ERR_MODULE_NOT_FOUND: Cannot find package 'express')
+    # =============================================================================
+    # Application root:  /home/USER/backend.kigalitaste.co   (this folder)
+    # Application URL:   your subdomain
+    # Startup file:      app.js
+    # Node.js version:   18+ or 20/22 LTS
+    #
+    # REQUIRED after every deploy / git pull:
+    #   cd /home/USER/backend.kigalitaste.co
+    #   npm install --omit=dev
+    #   (then click Restart in cPanel → Setup Node.js App)
+    #
+    # Also create .env in this folder (never commit it):
+    #   NODE_ENV=production
+    #   RUN_SCHEMA_INIT=false
+    #   DB_HOST=localhost
+    #   DB_PORT=3306
+    #   DB_USER=your_cpanel_db_user
+    #   DB_PASSWORD=your_cpanel_db_password
+    #   DB_NAME=your_cpanel_db_name
+    #   PORT=5001
+    #   API_BASE_URL=https://backend.kigalitaste.co
+    #   CORS_ORIGINS=https://your-frontend-domain
+    # =============================================================================

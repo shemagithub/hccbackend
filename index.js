@@ -72,6 +72,7 @@ import superadminRoutes from "./routes/superadminRoutes.js";
 import teamActivityRoutes from "./routes/teamActivityRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import receptionRoutes from "./routes/receptionRoutes.js";
+import mailRoutes from "./routes/mailRoutes.js";
 
 dotenv.config();
 const app = express();
@@ -366,6 +367,8 @@ app.use('/api/dashboard', dashboardRoutes);
 console.log('✅ Dashboard routes registered at /api/dashboard');
 app.use('/api/reception', receptionRoutes);
 console.log('✅ Reception desk routes registered at /api/reception');
+app.use('/api/mail', mailRoutes);
+console.log('✅ Hostinger mail routes registered at /api/mail');
 console.log('✅ Leave request routes registered at /api/leave-requests');
 
 const apiInfoPayload = () => ({

@@ -209,13 +209,28 @@ export class ProjectTeamController {
         status = 'active',
       } = req.body;
 
-      const projectIdValue = projectId ? parseInt(projectId, 10) : null;
-      const creatorContext = await resolveCreatorContext(req.staffId, projectIdValue);
+      const projectIdValue = (() => {
+        if (projectId == null || projectId === '') return null;
+        const asNumber = parseInt(projectId, 10);
+        if (!Number.isNaN(asNumber) && String(asNumber) === String(projectId).trim()) {
+          return asNumber;
+        }
+        return null;
+      })();
+
+      let resolvedProjectId = projectIdValue;
+      if (projectId && !resolvedProjectId) {
+        const byCode = await Project.findByProjectId(String(projectId).trim());
+        resolvedProjectId = byCode?.dbId || null;
+      }
+
+      const creatorContext = await resolveCreatorContext(req.staffId, resolvedProjectId);
 
       if (!creatorContext.canCreate) {
         return res.status(403).json({
           success: false,
-          message: 'You do not have permission to create project team users for this project',
+          message:
+            'You do not have permission to create project team users for this project. Only project managers, team leads, or admins can add users.',
         });
       }
 
@@ -243,8 +258,8 @@ export class ProjectTeamController {
       if (existingStaff) {
         let assignment = null;
 
-        if (projectIdValue) {
-          const project = await Project.findById(projectIdValue);
+        if (resolvedProjectId) {
+          const project = await Project.findById(resolvedProjectId);
           if (!project?.dbId) {
             return res.status(404).json({ success: false, message: 'Project not found for assignment' });
           }
@@ -264,7 +279,7 @@ export class ProjectTeamController {
 
         return res.status(200).json({
           success: true,
-          message: projectIdValue
+          message: resolvedProjectId
             ? 'Existing user added to this project team. Assignment email sent.'
             : 'Existing user selected for the project team',
           data: {
@@ -273,7 +288,7 @@ export class ProjectTeamController {
             projectRole: projectRole || 'contributor',
             existingUser: true,
             temporaryPassword: null,
-            emailSent: Boolean(projectIdValue),
+            emailSent: Boolean(resolvedProjectId),
           },
         });
       }
@@ -317,8 +332,8 @@ export class ProjectTeamController {
       let assignment = null;
       let projectName = '';
 
-      if (projectIdValue) {
-        const project = await Project.findById(projectIdValue);
+      if (resolvedProjectId) {
+        const project = await Project.findById(resolvedProjectId);
         if (!project) {
           return res.status(404).json({ success: false, message: 'Project not found for assignment' });
         }

@@ -348,7 +348,8 @@ export async function resolveCreatorContext(staffId, projectId = null) {
     };
   }
 
-  const isElevated = isElevatedProjectTeamCreator(staff);
+  const isElevated =
+    isElevatedProjectTeamCreator(staff) || isProjectManagerPortalStaff(staff);
   if (isElevated) {
     return {
       creatorRole: 'project_manager',
@@ -358,17 +359,23 @@ export async function resolveCreatorContext(staffId, projectId = null) {
     };
   }
 
+  let resolvedProjectId = projectId ? parseInt(projectId, 10) : null;
+  if (projectId && (Number.isNaN(resolvedProjectId) || !resolvedProjectId)) {
+    const byCode = await Project.findByProjectId(String(projectId));
+    resolvedProjectId = byCode?.dbId || null;
+  }
+
   let creatorRole = null;
-  if (projectId) {
-    creatorRole = await getStaffProjectRole(staffId, projectId);
+  if (resolvedProjectId) {
+    creatorRole = await getStaffProjectRole(staffId, resolvedProjectId);
   } else {
     const assignments = await ProjectAssignment.findAll({ staffId, limit: 200 });
     const managingAssignment = assignments.find(
       (assignment) =>
         ['active', 'pending'].includes(assignment.status) &&
-        canManageProjectRole(assignment.role)
+        canManageProjectRole(normalizeProjectRole(assignment.role) || assignment.role)
     );
-    creatorRole = managingAssignment?.role || null;
+    creatorRole = normalizeProjectRole(managingAssignment?.role) || managingAssignment?.role || null;
   }
 
   return {

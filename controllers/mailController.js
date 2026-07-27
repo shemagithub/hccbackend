@@ -143,14 +143,20 @@ export class MailController {
     try {
       const uid = Number(req.params.uid);
       const folder = String(req.query.folder || req.body?.folder || 'inbox');
-      const permanent = String(req.query.permanent || '') === 'true';
+      const permanent =
+        String(req.query.permanent || '') === 'true' ||
+        req.body?.permanent === true;
 
       if (!uid) {
         return res.status(400).json({ success: false, message: 'Invalid message uid' });
       }
 
       const result = await mailService.deleteMessage(folder, uid, { permanent });
-      return res.json({ success: true, data: result });
+      return res.json({
+        success: true,
+        data: result,
+        message: result.permanent ? 'Message permanently deleted' : 'Message moved to trash',
+      });
     } catch (error) {
       return handleError(res, error, 'Failed to delete message');
     }

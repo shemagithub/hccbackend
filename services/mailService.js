@@ -47,6 +47,7 @@ function formatApiError(error) {
   const message =
     data?.error ||
     data?.message ||
+    (typeof data === 'string' ? data : null) ||
     error?.message ||
     'Hostinger Mail API request failed';
   const code = data?.code || error?.code || 'ERR_MAIL_API';
@@ -54,6 +55,7 @@ function formatApiError(error) {
   err.status = status;
   err.code = code;
   err.params = data?.params;
+  err.details = data;
   return err;
 }
 
@@ -112,16 +114,16 @@ function mapMessage(msg, bodyText = '', bodyHtml = '') {
   const from = formatAddress(msg.from);
   const flags = Array.isArray(msg.flags) ? msg.flags : [];
   const isStarred = flags.some((f) => /flagged/i.test(f));
-  const plain =
-    bodyText ||
-    '';
+  const plain = bodyText || '';
   const previewSource = plain.replace(/\s+/g, ' ').trim();
+  const path = msg.path || 'INBOX';
+  const uid = msg.uid;
 
   return {
-    id: String(msg.uid),
-    uid: msg.uid,
-    path: msg.path,
-    folder: folderIdFromPath(msg.path),
+    id: `${path}:${uid}`,
+    uid,
+    path,
+    folder: folderIdFromPath(path),
     from: from.name || from.email || 'Unknown',
     fromEmail: from.email || '',
     to: formatAddresses(msg.to) || formatAddresses(msg.cc) || '',
@@ -210,14 +212,15 @@ export async function listFolders() {
 
 export async function ensureFolder(path) {
   const listed = await listFolders();
-  if (listed.folders.some((f) => f.path === path)) return listed;
+  if (listed.folders.some((f) => f.path === path || f.path.toLowerCase() === path.toLowerCase())) {
+    return listed;
+  }
   try {
     const account = await getAccount();
     const api = new FoldersApi(getConfig());
     const name = path.includes('.') ? path.split('.').pop() : path;
-    await api.createFolder(account.mailboxResourceId, { path: name === path ? name : path });
+    await api.createFolder(account.mailboxResourceId, { name });
   } catch (error) {
-    // Folder may already exist or path format may need parent prefix — ignore if list already has it
     const again = await listFolders();
     if (again.folders.some((f) => f.path === path || f.name === path.split('.').pop())) {
       return again;
@@ -326,6 +329,18 @@ export async function getMessage(folder, uid, includeBody = true) {
   }
 }
 
+function normalizeRecipients(value) {
+  const list = Array.isArray(value) ? value : value ? [value] : [];
+  return list
+    .flatMap((entry) => String(entry).split(/[,;]+/))
+    .map((entry) => entry.trim())
+    .map((entry) => {
+      const match = entry.match(/<([^>]+)>/);
+      return (match ? match[1] : entry).trim();
+    })
+    .filter((email) => email && email.includes('@'));
+}
+
 export async function sendEmail({
   to = [],
   cc = [],
@@ -338,33 +353,59 @@ export async function sendEmail({
 }) {
   try {
     const account = await getAccount();
-    const toList = Array.isArray(to) ? to.filter(Boolean) : [to].filter(Boolean);
-    const ccList = Array.isArray(cc) ? cc.filter(Boolean) : [];
-    const bccList = Array.isArray(bcc) ? bcc.filter(Boolean) : [];
+    const toList = normalizeRecipients(to);
+    const ccList = normalizeRecipients(cc);
+    const bccList = normalizeRecipients(bcc);
 
     if (toList.length === 0 && ccList.length === 0 && bccList.length === 0) {
-      const err = new Error('At least one recipient is required');
+      const err = new Error('At least one valid recipient email is required');
       err.status = 400;
       err.code = 'ERR_MAIL_NO_RECIPIENTS';
       throw err;
     }
 
+    if (!String(subject || '').trim()) {
+      const err = new Error('Subject is required');
+      err.status = 400;
+      err.code = 'ERR_MAIL_NO_SUBJECT';
+      throw err;
+    }
+
+    const plain =
+      String(text || '').trim() ||
+      String(html || '')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (!plain) {
+      const err = new Error('Message body is required');
+      err.status = 400;
+      err.code = 'ERR_MAIL_NO_BODY';
+      throw err;
+    }
+
     const api = new SendApi(getConfig());
-    const payload = {
-      to: toList,
-      cc: ccList,
-      bcc: bccList,
-      displayName: displayName || account.address,
-      subject: subject || '',
-      text: text || (html ? html.replace(/<[^>]+>/g, ' ') : ''),
-      html: html || `<pre>${(text || '').replace(/</g, '&lt;')}</pre>`,
-      attachments: (attachments || []).map((a) => ({
+    const safeAttachments = (attachments || [])
+      .filter((a) => a && (a.content || a.content === ''))
+      .map((a) => ({
         filename: a.filename || a.name || 'attachment',
         content: a.content || '',
         contentType: a.contentType || a.type || 'application/octet-stream',
         cid: a.cid || '',
         encoding: a.encoding || 'base64',
-      })),
+      }));
+
+    const payload = {
+      to: toList,
+      cc: ccList,
+      bcc: bccList,
+      displayName: displayName || account.address,
+      subject: String(subject).trim(),
+      text: plain,
+      html: html || `<p>${plain.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`,
+      attachments: safeAttachments,
     };
 
     await api.sendEmail(account.mailboxResourceId, payload);
@@ -372,10 +413,18 @@ export async function sendEmail({
       success: true,
       from: account.address,
       to: toList,
+      cc: ccList,
+      bcc: bccList,
       subject: payload.subject,
     };
   } catch (error) {
-    if (error.status || error.code === 'ERR_MAIL_NOT_CONFIGURED' || error.code === 'ERR_MAIL_NO_RECIPIENTS') {
+    if (
+      error.status ||
+      error.code === 'ERR_MAIL_NOT_CONFIGURED' ||
+      error.code === 'ERR_MAIL_NO_RECIPIENTS' ||
+      error.code === 'ERR_MAIL_NO_SUBJECT' ||
+      error.code === 'ERR_MAIL_NO_BODY'
+    ) {
       throw error;
     }
     throw formatApiError(error);
@@ -405,12 +454,16 @@ export async function moveMessage(folder, uid, targetFolder) {
     const account = await getAccount();
     const fromPath = resolveFolderPath(folder);
     const toPath = resolveFolderPath(targetFolder);
+    if (fromPath === toPath) {
+      return { success: true, from: fromPath, to: toPath, skipped: true };
+    }
     if (toPath === FOLDER_PATHS.archive) {
       await ensureFolder(toPath);
     }
     const api = new MessagesApi(getConfig());
+    // Hostinger Mail API expects `targetFolder`, not `path`
     await api.moveMessage(account.mailboxResourceId, fromPath, Number(uid), {
-      path: toPath,
+      targetFolder: toPath,
     });
     return { success: true, from: fromPath, to: toPath };
   } catch (error) {
@@ -422,13 +475,14 @@ export async function moveMessage(folder, uid, targetFolder) {
 export async function deleteMessage(folder, uid, { permanent = false } = {}) {
   try {
     const path = resolveFolderPath(folder);
-    if (!permanent && path !== FOLDER_PATHS.trash) {
+    const inTrash = path === FOLDER_PATHS.trash || /trash/i.test(path);
+    if (!permanent && !inTrash) {
       return moveMessage(folder, uid, 'trash');
     }
     const account = await getAccount();
     const api = new MessagesApi(getConfig());
     await api.deleteMessage(account.mailboxResourceId, path, Number(uid));
-    return { success: true };
+    return { success: true, permanent: true };
   } catch (error) {
     if (error.status || error.code === 'ERR_MAIL_NOT_CONFIGURED') throw error;
     throw formatApiError(error);

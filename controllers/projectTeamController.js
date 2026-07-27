@@ -24,8 +24,9 @@ import {
 import { sendWelcomeAccountEmail } from '../services/transactionalMail.js';
 
 function generateTemporaryPassword() {
-  const suffix = Math.random().toString(36).slice(-6);
-  return `Hcc${suffix}9A`;
+  // Guaranteed to pass Staff password rules: upper + lower + digit, length >= 8
+  const rand = Math.random().toString(36).slice(-6).replace(/[^a-z0-9]/gi, 'a');
+  return `Hcc${rand}9A`;
 }
 
 
@@ -206,8 +207,10 @@ export class ProjectTeamController {
         departmentId,
         projectId,
         projectRole = 'contributor',
-        status = 'active',
       } = req.body;
+
+      // Project team users must be able to sign in immediately
+      const status = 'active';
 
       const projectIdValue = (() => {
         if (projectId == null || projectId === '') return null;
@@ -324,9 +327,13 @@ export class ProjectTeamController {
         position: position || mapProjectRoleToDefaultPosition(projectRole),
         role: mapProjectRoleToSystemRole(projectRole),
         controlPanel: mapProjectRoleToControlPanel(projectRole),
-        status,
+        status: 'active',
         notes: `Created for project team as ${formatProjectRole(projectRole)} by ${creator?.email || 'project management'}`,
       });
+
+      // Ensure portal + active status even if create payload is altered
+      await applyStaffPortalForProjectRole(staffRecord.id, projectRole || 'contributor');
+      await Staff.update(staffRecord.id, { status: 'active' });
 
       const newStaff = await Staff.findById(staffRecord.id);
       let assignment = null;
@@ -363,13 +370,18 @@ export class ProjectTeamController {
       res.status(201).json({
         success: true,
         message: emailResult.sent
-          ? 'Project team user created successfully. Welcome email sent.'
-          : 'Project team user created successfully. Welcome email could not be sent.',
+          ? 'Project team user created successfully. Welcome email sent with sign-in details.'
+          : 'Project team user created successfully. Share the temporary password with them so they can sign in.',
         data: {
           staff: newStaff,
           assignment,
           projectRole: projectRole || 'contributor',
-          temporaryPassword: password ? null : resolvedPassword,
+          // Always return the password that was set for this new account
+          temporaryPassword: resolvedPassword,
+          passwordWasGenerated: !password,
+          loginUrl:
+            (process.env.FRONTEND_URL || 'https://management.hccafrica.com').replace(/\/$/, '') +
+            '/auth/login',
           emailSent: Boolean(emailResult.sent),
         },
       });

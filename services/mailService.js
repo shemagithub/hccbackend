@@ -137,7 +137,14 @@ function mapMessage(msg, bodyText = '', bodyHtml = '') {
     isStarred,
     hasAttachments: Array.isArray(msg.attachments) && msg.attachments.length > 0,
     attachments: (msg.attachments || []).map((a) => a.filename || a.id || 'attachment'),
-    attachmentMeta: msg.attachments || [],
+    attachmentMeta: (msg.attachments || []).map((a) => ({
+      id: a.id,
+      filename: a.filename || 'attachment',
+      contentType: a.contentType || 'application/octet-stream',
+      sizeBytes: Number(a.sizeBytes) || 0,
+      inline: Boolean(a.inline),
+      contentId: a.contentId || null,
+    })),
     priority: 'normal',
     flags,
     messageId: msg.messageId || null,
@@ -388,14 +395,21 @@ export async function sendEmail({
 
     const api = new SendApi(getConfig());
     const safeAttachments = (attachments || [])
-      .filter((a) => a && (a.content || a.content === ''))
+      .filter((a) => a && typeof a.content === 'string' && a.content.length > 0)
       .map((a) => ({
-        filename: a.filename || a.name || 'attachment',
-        content: a.content || '',
+        filename: String(a.filename || a.name || 'attachment').slice(0, 255),
+        content: a.content,
         contentType: a.contentType || a.type || 'application/octet-stream',
         cid: a.cid || '',
         encoding: a.encoding || 'base64',
       }));
+
+    if ((attachments || []).length > 0 && safeAttachments.length === 0) {
+      const err = new Error('Attachments were provided but none could be sent (missing file content)');
+      err.status = 400;
+      err.code = 'ERR_MAIL_ATTACHMENTS';
+      throw err;
+    }
 
     const payload = {
       to: toList,
@@ -416,6 +430,7 @@ export async function sendEmail({
       cc: ccList,
       bcc: bccList,
       subject: payload.subject,
+      attachmentCount: safeAttachments.length,
     };
   } catch (error) {
     if (
@@ -423,7 +438,8 @@ export async function sendEmail({
       error.code === 'ERR_MAIL_NOT_CONFIGURED' ||
       error.code === 'ERR_MAIL_NO_RECIPIENTS' ||
       error.code === 'ERR_MAIL_NO_SUBJECT' ||
-      error.code === 'ERR_MAIL_NO_BODY'
+      error.code === 'ERR_MAIL_NO_BODY' ||
+      error.code === 'ERR_MAIL_ATTACHMENTS'
     ) {
       throw error;
     }
@@ -485,6 +501,92 @@ export async function deleteMessage(folder, uid, { permanent = false } = {}) {
     return { success: true, permanent: true };
   } catch (error) {
     if (error.status || error.code === 'ERR_MAIL_NOT_CONFIGURED') throw error;
+    throw formatApiError(error);
+  }
+}
+
+export async function downloadAttachment(folder, uid, attachmentId) {
+  try {
+    if (!attachmentId) {
+      const err = new Error('Attachment id is required');
+      err.status = 400;
+      err.code = 'ERR_MAIL_ATTACHMENT_ID';
+      throw err;
+    }
+    const account = await getAccount();
+    const path = resolveFolderPath(folder);
+    const api = new MessagesApi(getConfig());
+    const res = await api.getMessageAttachment(
+      account.mailboxResourceId,
+      path,
+      Number(uid),
+      String(attachmentId),
+      { responseType: 'arraybuffer' },
+    );
+
+    const buffer = Buffer.from(res.data || []);
+    let contentType =
+      res.headers?.['content-type'] ||
+      res.headers?.['Content-Type'] ||
+      'application/octet-stream';
+    contentType = String(contentType).split(';')[0].trim() || 'application/octet-stream';
+
+    const disposition =
+      res.headers?.['content-disposition'] ||
+      res.headers?.['Content-Disposition'] ||
+      '';
+    let filename = 'attachment';
+    const match = String(disposition).match(/filename\*?=(?:UTF-8''|")?([^\";]+)"?/i);
+    if (match?.[1]) {
+      try {
+        filename = decodeURIComponent(match[1].replace(/"/g, ''));
+      } catch {
+        filename = match[1].replace(/"/g, '');
+      }
+    }
+
+    // Prefer metadata filename + mime when Hostinger returns octet-stream
+    try {
+      const detail = await api.getMessage(account.mailboxResourceId, path, Number(uid));
+      const meta = (detail.data?.attachments || []).find(
+        (a) => String(a.id || a.attachmentId || '') === String(attachmentId),
+      );
+      if (meta?.filename) filename = meta.filename;
+      if (meta?.contentType && contentType === 'application/octet-stream') {
+        contentType = String(meta.contentType).split(';')[0].trim();
+      }
+    } catch {
+      // non-fatal
+    }
+
+    if (contentType === 'application/octet-stream') {
+      const ext = String(filename).split('.').pop()?.toLowerCase();
+      const byExt = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        bmp: 'image/bmp',
+        svg: 'image/svg+xml',
+        pdf: 'application/pdf',
+        txt: 'text/plain',
+        html: 'text/html',
+        htm: 'text/html',
+      };
+      if (ext && byExt[ext]) contentType = byExt[ext];
+    }
+
+    return {
+      buffer,
+      contentType,
+      filename,
+      size: buffer.length,
+    };
+  } catch (error) {
+    if (error.status || error.code === 'ERR_MAIL_NOT_CONFIGURED' || error.code === 'ERR_MAIL_ATTACHMENT_ID') {
+      throw error;
+    }
     throw formatApiError(error);
   }
 }

@@ -1,4 +1,5 @@
 import * as mailService from '../services/mailService.js';
+import { sendClientProjectUpdate } from '../services/transactionalMail.js';
 
 function handleError(res, error, fallback = 'Mail operation failed') {
   const status = error?.status || 500;
@@ -41,7 +42,6 @@ export class MailController {
         folder === 'starred'
           ? await mailService.listStarredMessages(page, perPage)
           : await mailService.listMessages(folder, page, perPage, sort);
-
       return res.json({ success: true, data });
     } catch (error) {
       return handleError(res, error, 'Failed to list messages');
@@ -89,6 +89,41 @@ export class MailController {
       return res.json({ success: true, data: result, message: 'Email sent' });
     } catch (error) {
       return handleError(res, error, 'Failed to send email');
+    }
+  }
+
+  static async sendClientUpdate(req, res) {
+    try {
+      const {
+        to,
+        clientId,
+        projectId,
+        updateType,
+        title,
+        message,
+        documentIds,
+        attachments,
+      } = req.body || {};
+
+      const result = await sendClientProjectUpdate({
+        to,
+        clientId,
+        projectId,
+        updateType,
+        title,
+        message,
+        documentIds,
+        extraAttachments: attachments,
+        sentById: req.staffId,
+      });
+
+      return res.json({
+        success: true,
+        data: result,
+        message: `Client update sent to ${result.to?.join(', ') || 'recipients'}`,
+      });
+    } catch (error) {
+      return handleError(res, error, 'Failed to send client project update');
     }
   }
 
@@ -159,6 +194,37 @@ export class MailController {
       });
     } catch (error) {
       return handleError(res, error, 'Failed to delete message');
+    }
+  }
+
+  static async downloadAttachment(req, res) {
+    try {
+      const uid = Number(req.params.uid);
+      const attachmentId = String(req.params.attachmentId || '');
+      const folder = String(req.query.folder || 'inbox');
+      const disposition = String(req.query.disposition || 'inline') === 'attachment'
+        ? 'attachment'
+        : 'inline';
+
+      if (!uid || !attachmentId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Message uid and attachment id are required',
+        });
+      }
+
+      const file = await mailService.downloadAttachment(folder, uid, attachmentId);
+      const safeName = String(file.filename || 'attachment').replace(/[\r\n"]/g, '');
+      res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
+      res.setHeader(
+        'Content-Disposition',
+        `${disposition}; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+      );
+      res.setHeader('Content-Length', String(file.size || file.buffer.length));
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      return res.status(200).send(file.buffer);
+    } catch (error) {
+      return handleError(res, error, 'Failed to download attachment');
     }
   }
 }

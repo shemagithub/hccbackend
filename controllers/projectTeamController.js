@@ -21,6 +21,7 @@ import {
   getProjectAssignments,
   isElevatedProjectTeamCreator,
 } from '../utils/projectTeam.js';
+import { sendWelcomeAccountEmail } from '../services/transactionalMail.js';
 
 function generateTemporaryPassword() {
   const suffix = Math.random().toString(36).slice(-6);
@@ -253,6 +254,7 @@ export class ProjectTeamController {
             staffId: existingStaff.id,
             projectRole: projectRole || 'contributor',
             createdBy: req.staffId,
+            notify: true,
           });
         } else {
           await applyStaffPortalForProjectRole(existingStaff.id, projectRole || 'contributor');
@@ -263,7 +265,7 @@ export class ProjectTeamController {
         return res.status(200).json({
           success: true,
           message: projectIdValue
-            ? 'Existing user added to this project team'
+            ? 'Existing user added to this project team. Assignment email sent.'
             : 'Existing user selected for the project team',
           data: {
             staff,
@@ -271,6 +273,7 @@ export class ProjectTeamController {
             projectRole: projectRole || 'contributor',
             existingUser: true,
             temporaryPassword: null,
+            emailSent: Boolean(projectIdValue),
           },
         });
       }
@@ -312,29 +315,47 @@ export class ProjectTeamController {
 
       const newStaff = await Staff.findById(staffRecord.id);
       let assignment = null;
+      let projectName = '';
 
       if (projectIdValue) {
         const project = await Project.findById(projectIdValue);
         if (!project) {
           return res.status(404).json({ success: false, message: 'Project not found for assignment' });
         }
+        projectName = project.name || '';
 
         assignment = await assignStaffToProject({
           projectId: project.dbId,
           staffId: staffRecord.id,
           projectRole: projectRole || 'contributor',
           createdBy: req.staffId,
+          notify: false,
         });
       }
 
+      const createdByName = creator
+        ? [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email
+        : '';
+
+      const emailResult = await sendWelcomeAccountEmail({
+        staff: newStaff,
+        password: resolvedPassword,
+        projectName,
+        projectRole: projectRole || 'contributor',
+        createdByName,
+      });
+
       res.status(201).json({
         success: true,
-        message: 'Project team user created successfully',
+        message: emailResult.sent
+          ? 'Project team user created successfully. Welcome email sent.'
+          : 'Project team user created successfully. Welcome email could not be sent.',
         data: {
           staff: newStaff,
           assignment,
           projectRole: projectRole || 'contributor',
           temporaryPassword: password ? null : resolvedPassword,
+          emailSent: Boolean(emailResult.sent),
         },
       });
     } catch (error) {

@@ -2,6 +2,7 @@ import Staff from '../models/Staff.js';
 import Role from '../models/Role.js';
 import UserPermission from '../models/UserPermission.js';
 import { buildStaffAccessPayload } from '../utils/rolePermissions.js';
+import { sendWelcomeAccountEmail, sendPasswordResetEmail } from '../services/transactionalMail.js';
 
 export class StaffController {
   // Create a new staff member
@@ -88,10 +89,31 @@ export class StaffController {
 
       const newStaff = await Staff.findById(staffId.id);
 
+      let createdByName = '';
+      if (req.staffId) {
+        try {
+          const creator = await Staff.findById(req.staffId);
+          createdByName = creator
+            ? [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email
+            : '';
+        } catch {
+          // ignore
+        }
+      }
+
+      const emailResult = await sendWelcomeAccountEmail({
+        staff: newStaff,
+        password,
+        createdByName,
+      });
+
       res.status(201).json({
         success: true,
-        message: 'Staff member created successfully',
-        data: newStaff
+        message: emailResult.sent
+          ? 'Staff member created successfully. Welcome email sent.'
+          : 'Staff member created successfully. Welcome email could not be sent.',
+        data: newStaff,
+        emailSent: Boolean(emailResult.sent),
       });
     } catch (error) {
       console.error('Create staff error:', error);
@@ -518,9 +540,30 @@ export class StaffController {
       // Reset password
       await Staff.resetPassword(parseInt(id), newPassword);
 
+      let resetByName = '';
+      if (req.staffId) {
+        try {
+          const actor = await Staff.findById(req.staffId);
+          resetByName = actor
+            ? [actor.firstName, actor.lastName].filter(Boolean).join(' ') || actor.email
+            : '';
+        } catch {
+          // ignore
+        }
+      }
+
+      const emailResult = await sendPasswordResetEmail({
+        staff,
+        password: newPassword,
+        resetByName,
+      });
+
       res.json({
         success: true,
-        message: 'Password reset successfully'
+        message: emailResult.sent
+          ? 'Password reset successfully. Email sent to the user.'
+          : 'Password reset successfully. Email could not be sent.',
+        emailSent: Boolean(emailResult.sent),
       });
     } catch (error) {
       console.error('Password reset error:', error);

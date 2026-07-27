@@ -1,5 +1,6 @@
 import Task from '../models/Task.js';
 import Staff from '../models/Staff.js';
+import Project from '../models/Project.js';
 import {
   isElevatedProjectTeamCreator,
   isProjectManagerPortalStaff,
@@ -14,6 +15,7 @@ import {
   buildApprovalUpdate,
   getApprovalStageLabel,
 } from '../utils/taskApproval.js';
+import { sendTaskAssignmentEmails } from '../services/transactionalMail.js';
 
 export class TaskController {
   // Create a new task
@@ -191,10 +193,33 @@ export class TaskController {
         createdBy
       });
 
+      let emailSent = 0;
+      if (cleanAssigneeIds && cleanAssigneeIds.length > 0) {
+        let projectName = '';
+        try {
+          if (cleanProjectId) {
+            const project = await Project.findById(cleanProjectId);
+            projectName = project?.name || '';
+          }
+        } catch {
+          // ignore
+        }
+        const mailResult = await sendTaskAssignmentEmails({
+          assigneeIds: cleanAssigneeIds,
+          task,
+          projectName,
+          assignedById: createdBy || req.staffId,
+        });
+        emailSent = mailResult.sent || 0;
+      }
+
       res.status(201).json({
         success: true,
-        message: 'Task created. Assignee must complete work and submit for approval.',
-        data: task
+        message: emailSent
+          ? `Task created. Assignment email sent to ${emailSent} assignee${emailSent === 1 ? '' : 's'}.`
+          : 'Task created. Assignee must complete work and submit for approval.',
+        data: task,
+        emailSent,
       });
     } catch (error) {
       console.error('Create task error:', error);

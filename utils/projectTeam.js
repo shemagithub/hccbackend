@@ -789,6 +789,7 @@ export async function assignStaffToProject({
   staffId,
   projectRole = 'contributor',
   createdBy = null,
+  notify = true,
 }) {
   if (!projectId || !staffId) {
     throw new Error('Project ID and staff ID are required');
@@ -824,6 +825,21 @@ export async function assignStaffToProject({
 
   await rebuildProjectTeamFromAssignments(project.dbId);
   await applyStaffPortalForProjectRole(staffId, projectRole);
+
+  if (notify) {
+    try {
+      const { sendProjectAssignmentEmail } = await import('../services/transactionalMail.js');
+      await sendProjectAssignmentEmail({
+        staffId,
+        projectId: project.dbId,
+        projectRole,
+        assignedById: createdBy,
+      });
+    } catch (error) {
+      console.error('Project assignment email failed:', error?.message || error);
+    }
+  }
+
   return assignment;
 }
 
@@ -831,6 +847,7 @@ export async function assignMultipleStaffToProject({
   projectId,
   members = [],
   createdBy = null,
+  notify = true,
 }) {
   if (!projectId) {
     throw new Error('Project ID is required');
@@ -881,6 +898,20 @@ export async function assignMultipleStaffToProject({
 
     assignments.push(assignment);
     await applyStaffPortalForProjectRole(member.staffId, member.projectRole);
+
+    if (notify) {
+      try {
+        const { sendProjectAssignmentEmail } = await import('../services/transactionalMail.js');
+        await sendProjectAssignmentEmail({
+          staffId: member.staffId,
+          projectId: project.dbId,
+          projectRole: member.projectRole,
+          assignedById: createdBy,
+        });
+      } catch (error) {
+        console.error('Project assignment email failed:', error?.message || error);
+      }
+    }
   }
 
   await rebuildProjectTeamFromAssignments(project.dbId);

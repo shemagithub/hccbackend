@@ -239,10 +239,37 @@ app.use(cors({
   },
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Cache-Control',
+    'Pragma',
+  ],
+  exposedHeaders: ['Content-Disposition', 'Content-Type', 'Content-Length'],
   optionsSuccessStatus: 204,
+  preflightContinue: false,
 }));
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+
+// Explicit preflight handler so OPTIONS never falls through blocked routes
+app.options('*', cors({
+  origin(origin, callback) {
+    if (isAllowedCorsOrigin(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
+  credentials: true,
+}));
+
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+  contentSecurityPolicy: false,
+}));
 app.use(morgan("dev"));
 
 // API Routes

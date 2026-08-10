@@ -1,6 +1,9 @@
 import ProjectAssignment from '../models/ProjectAssignment.js';
 import Staff from '../models/Staff.js';
-import { rebuildProjectTeamFromAssignments } from '../utils/projectTeam.js';
+import {
+  rebuildProjectTeamFromAssignments,
+  applyStaffPortalForProjectRole,
+} from '../utils/projectTeam.js';
 
 export const getProjectAssignments = async (req, res) => {
   try {
@@ -80,6 +83,10 @@ export const updateProjectAssignment = async (req, res) => {
     }
 
     await rebuildProjectTeamFromAssignments(existing.projectId);
+
+    if (req.body?.role) {
+      await applyStaffPortalForProjectRole(existing.staffId, req.body.role);
+    }
 
     const assignment = await ProjectAssignment.findById(parseInt(req.params.id));
     res.json({ success: true, data: assignment, message: 'Project assignment updated successfully' });

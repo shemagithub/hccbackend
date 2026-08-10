@@ -201,12 +201,14 @@ export function mapProjectRoleToControlPanel(projectRole) {
   switch (projectRole) {
     case 'project_manager':
       return 'project-manager';
+    case 'team_lead':
+      return 'project-team';
     case 'contributor':
       return 'contributor';
     case 'viewer':
       return 'viewer';
     default:
-      return 'project-team';
+      return 'contributor';
   }
 }
 
@@ -278,10 +280,25 @@ export async function applyStaffPortalForProjectRole(staffId, projectRole) {
   }
 
   if (projectRole === 'team_lead') {
-    if (!currentPanel || ['contributor', 'viewer'].includes(currentPanel)) {
-      if (currentPanel !== 'project-manager') {
-        await Staff.update(staffId, { controlPanel: 'project-team' });
-      }
+    const updates = {};
+    const canAssignTeamPanel =
+      !currentPanel ||
+      ['project-team', 'contributor', 'viewer', 'employee'].includes(currentPanel);
+
+    if (canAssignTeamPanel) {
+      updates.controlPanel = 'project-team';
+    }
+
+    const roleNorm = (staff.role || '').toLowerCase().trim();
+    const isProtectedRole = ['superadmin', 'admin', 'administrator', 'project manager', 'projectmanager'].includes(
+      roleNorm.replace(/\s+/g, ' '),
+    );
+    if (!isProtectedRole && roleNorm !== 'team lead') {
+      updates.role = 'Team Lead';
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await Staff.update(staffId, updates);
     }
     return;
   }
@@ -568,6 +585,7 @@ export async function getProjectTeamResources(projectId) {
       lastName: staffRecord.lastName,
       staffName: getStaffDisplayName(staffRecord),
       email: staffRecord.email,
+      phone: staffRecord.phone || null,
       position: staffRecord.position,
       department: staffRecord.departmentName || staffRecord.department,
       projectRole: 'contributor',
@@ -602,16 +620,19 @@ export async function getProjectTeamResources(projectId) {
 }
 
 export function mapAssignmentToTeamMember(assignment) {
-  const staffName = assignment.staffName || '';
-  const nameParts = staffName.trim().split(/\s+/);
-
   return {
     id: assignment.staffId,
     dbId: assignment.staffId,
-    firstName: nameParts[0] || staffName || 'Unknown',
-    lastName: nameParts.slice(1).join(' ') || '',
-    staffName: assignment.staffName,
+    firstName: assignment.staffFirstName || assignment.staffName?.trim().split(/\s+/)[0] || 'Unknown',
+    lastName:
+      assignment.staffLastName ||
+      assignment.staffName?.trim().split(/\s+/).slice(1).join(' ') ||
+      '',
+    staffName:
+      assignment.staffName ||
+      [assignment.staffFirstName, assignment.staffLastName].filter(Boolean).join(' '),
     email: assignment.staffEmail,
+    phone: assignment.staffPhone || null,
     position: assignment.staffPosition,
     department: assignment.departmentName,
     projectRole: assignment.role || 'contributor',
@@ -832,6 +853,7 @@ export async function assignStaffToProject({
 
   await rebuildProjectTeamFromAssignments(project.dbId);
   await applyStaffPortalForProjectRole(staffId, projectRole);
+  await Staff.update(staffId, { status: 'active' });
 
   if (notify) {
     try {

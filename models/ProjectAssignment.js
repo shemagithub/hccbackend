@@ -59,7 +59,7 @@ class ProjectAssignment {
   static async findByProjectAndStaff(projectId, staffId) {
     const [rows] = await pool.execute(
       `SELECT pa.*, p.name as project_name, p.project_id as project_code, p.status as project_status,
-              s.first_name, s.last_name, s.email, s.position, s.department_id,
+              s.first_name, s.last_name, s.email, s.phone, s.position, s.department_id,
               d.name as department_name
        FROM project_assignments pa
        LEFT JOIN projects p ON pa.project_id = p.id
@@ -116,7 +116,7 @@ class ProjectAssignment {
   static async findAll(filters = {}) {
     let query = `
       SELECT pa.*, p.name as project_name, p.project_id as project_code, p.status as project_status,
-             s.first_name, s.last_name, s.email, s.position, s.department_id,
+             s.first_name, s.last_name, s.email, s.phone, s.position, s.department_id,
              d.name as department_name
       FROM project_assignments pa
       LEFT JOIN projects p ON pa.project_id = p.id
@@ -171,7 +171,7 @@ class ProjectAssignment {
   static async findById(id) {
     const [rows] = await pool.execute(
       `SELECT pa.*, p.name as project_name, p.project_id as project_code, p.status as project_status,
-              s.first_name, s.last_name, s.email, s.position, s.department_id,
+              s.first_name, s.last_name, s.email, s.phone, s.position, s.department_id,
               d.name as department_name
        FROM project_assignments pa
        LEFT JOIN projects p ON pa.project_id = p.id
@@ -237,8 +237,11 @@ class ProjectAssignment {
       projectCode: row.project_code,
       projectStatus: row.project_status,
       staffId: row.staff_id,
-      staffName: row.first_name && row.last_name ? `${row.first_name} ${row.last_name}` : null,
+      staffFirstName: row.first_name || null,
+      staffLastName: row.last_name || null,
+      staffName: row.first_name && row.last_name ? `${row.first_name} ${row.last_name}` : (row.first_name || row.last_name || null),
       staffEmail: row.email,
+      staffPhone: row.phone || null,
       staffPosition: row.position,
       departmentId: row.department_id,
       departmentName: row.department_name,

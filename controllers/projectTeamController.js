@@ -278,6 +278,9 @@ export class ProjectTeamController {
           await applyStaffPortalForProjectRole(existingStaff.id, projectRole || 'contributor');
         }
 
+        // Ensure they can sign in immediately
+        await Staff.update(existingStaff.id, { status: 'active' });
+
         const staff = await Staff.findById(existingStaff.id);
 
         return res.status(200).json({
@@ -454,6 +457,137 @@ export class ProjectTeamController {
       res.status(500).json({
         success: false,
         message: error.message || 'Failed to assign project team members',
+        error: error.message,
+      });
+    }
+  }
+
+  static async updateResourceMember(req, res) {
+    try {
+      if (!req.staffId) {
+        return res.status(401).json({ success: false, message: 'Authentication required' });
+      }
+
+      const projectId = parseInt(req.params.projectId, 10);
+      if (!projectId || Number.isNaN(projectId)) {
+        return res.status(400).json({ success: false, message: 'Valid project ID is required' });
+      }
+
+      const creatorContext = await resolveCreatorContext(req.staffId, projectId);
+      if (!creatorContext.canCreate && !creatorContext.isElevated && !['project_manager', 'team_lead'].includes(creatorContext.creatorRole)) {
+        return res.status(403).json({
+          success: false,
+          message: 'You do not have permission to edit project team members on this project',
+        });
+      }
+
+      const {
+        staffId,
+        assignmentId,
+        firstName,
+        lastName,
+        email,
+        phone,
+        position,
+        projectRole = 'contributor',
+        assignmentStatus = 'active',
+      } = req.body || {};
+
+      if (!canCreatorAssignRole(creatorContext.creatorRole, projectRole, creatorContext.isElevated)) {
+        return res.status(403).json({
+          success: false,
+          message: `Your role cannot assign the ${formatProjectRole(projectRole)} role`,
+        });
+      }
+
+      let assignment = null;
+      if (assignmentId) {
+        assignment = await ProjectAssignment.findById(parseInt(assignmentId, 10));
+        if (!assignment || Number(assignment.projectId) !== projectId) {
+          return res.status(404).json({ success: false, message: 'Project assignment not found' });
+        }
+      }
+
+      const resolvedStaffId = parseInt(staffId || assignment?.staffId, 10);
+      if (!resolvedStaffId || Number.isNaN(resolvedStaffId)) {
+        return res.status(400).json({ success: false, message: 'Staff ID is required' });
+      }
+
+      const staff = await Staff.findById(resolvedStaffId);
+      if (!staff) {
+        return res.status(404).json({ success: false, message: 'Staff member not found' });
+      }
+
+      if (!firstName?.trim() || !lastName?.trim() || !email?.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'First name, last name, and email are required',
+        });
+      }
+
+      const normalizedEmail = email.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ success: false, message: 'Invalid email format' });
+      }
+
+      if (normalizedEmail.toLowerCase() !== String(staff.email || '').toLowerCase()) {
+        const emailTaken = await Staff.emailExists(normalizedEmail, resolvedStaffId);
+        if (emailTaken) {
+          return res.status(409).json({ success: false, message: 'Email already exists' });
+        }
+      }
+
+      await Staff.update(resolvedStaffId, {
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        email: normalizedEmail,
+        phone: phone?.trim() || null,
+        position: position?.trim() || staff.position || mapProjectRoleToDefaultPosition(projectRole),
+        role: mapProjectRoleToSystemRole(projectRole),
+        status: 'active',
+      });
+
+      if (assignment?.dbId) {
+        await ProjectAssignment.update(assignment.dbId, {
+          role: projectRole,
+          status: ['active', 'pending', 'completed', 'cancelled'].includes(assignmentStatus)
+            ? assignmentStatus
+            : 'active',
+        });
+      } else {
+        assignment = await assignStaffToProject({
+          projectId,
+          staffId: resolvedStaffId,
+          projectRole,
+          createdBy: req.staffId,
+          notify: false,
+        });
+      }
+
+      await applyStaffPortalForProjectRole(resolvedStaffId, projectRole);
+
+      const resources = await getProjectTeamResources(projectId);
+      const member =
+        resources.members.find(
+          (item) =>
+            Number(item.assignmentId) === Number(assignment?.dbId || assignment?.assignmentId) ||
+            Number(item.id) === resolvedStaffId,
+        ) || null;
+
+      res.json({
+        success: true,
+        message: 'Project team member updated successfully',
+        data: {
+          member,
+          portal: mapProjectRoleToControlPanel(projectRole),
+          projectRole,
+        },
+      });
+    } catch (error) {
+      console.error('Update project resource member error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Failed to update project team member',
         error: error.message,
       });
     }

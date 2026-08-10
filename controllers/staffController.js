@@ -493,10 +493,16 @@ export class StaffController {
     } catch (error) {
       console.error('[AUTH] Authentication error:', error);
       console.error('[AUTH] Error stack:', error.stack);
-      if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+      if (
+        error.code === 'ETIMEDOUT' ||
+        error.code === 'ECONNREFUSED' ||
+        error.code === 'ER_ACCESS_DENIED_ERROR' ||
+        error.errno === 1045
+      ) {
         return res.status(503).json({
           success: false,
-          message: 'Database is unavailable. Please try again in a moment.',
+          message:
+            'Database is unavailable. For local development, set DB_USER/DB_PASSWORD/DB_NAME in hccbackend/.env to your local MySQL (e.g. root / hcc).',
           error: error.message
         });
       }

@@ -8,6 +8,11 @@ router.get('/workspace', authenticate, ProjectTeamController.getWorkspace);
 router.get('/permissions', authenticate, ProjectTeamController.getPermissions);
 router.get('/projects/:projectId/resources', authenticate, ProjectTeamController.getProjectResources);
 router.post('/members', authenticate, ProjectTeamController.createTeamMember);
+router.put(
+  '/projects/:projectId/members',
+  authenticate,
+  ProjectTeamController.updateResourceMember,
+);
 router.post('/projects/:projectId/assign-members', authenticate, ProjectTeamController.assignMembers);
 
 export default router;
